@@ -78,17 +78,20 @@
           <div class="panel">
             <div class="panel-label">Robots K</div>
             <div class="k-wrap">
-              <input
-                type="range"
-                id="k-slider"
-                min="1"
-                max="10"
-                value="1"
-                step="1"
-                oninput="onKChange(this.value)"
-              />
-              <div class="k-labels">
-                <span>1</span><span id="k-max-label">10</span>
+              <div class="k-slider-wrap">
+                <input
+                  type="range"
+                  id="k-slider"
+                  min="1"
+                  max="10"
+                  value="1"
+                  step="1"
+                  oninput="onKChange(this.value)"
+                />
+                <div class="k-labels">
+                  <span class="left">1</span>
+                  <span class="right" id="k-max-label">10</span>
+                </div>
               </div>
             </div>
             <div class="k-desc" id="k-desc">1 robot</div>

@@ -183,6 +183,22 @@ header {
 .k-wrap { margin-bottom: 8px; }
 .k-labels { display: flex; justify-content: space-between; font-size: 10px; color: var(--muted); margin-top: 4px; }
 .k-desc { font-size: 11px; color: var(--accent); min-height: 16px; }
+.k-slider-wrap {
+  position: relative;
+}
+.k-slider-wrap input[type=range] {
+  width: 100%;
+}
+.k-labels {
+  position: relative;
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  padding: 0 6px; /* aligns with slider thumb inset */
+}
 
 /* Phase */
 .phase-list { display: flex; flex-direction: column; gap: 5px; }
