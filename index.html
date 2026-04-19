@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TSP</title>
+    <link
+      href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=Syne:wght@400;500;700;800&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <div class="logo">TSP<span>.</span>MST</div>
+        <div class="header-meta">double-tree · k-robot decomposition</div>
+      </header>
+
+      <div class="main">
+        <!-- LEFT: map canvas -->
+        <div class="canvas-wrap" id="canvas-wrap">
+          <canvas id="canvas"></canvas>
+          <div class="canvas-overlay" id="overlay">
+            <div class="empty-hint">
+              <strong>start plotting</strong>
+              select a mode → click to place<br />
+              depot first, then delivery points
+            </div>
+          </div>
+        </div>
+
+        <!-- RIGHT: sidebar -->
+        <div class="sidebar">
+          <div class="panel">
+            <div class="panel-label">Mode</div>
+            <div class="mode-group">
+              <button
+                class="mode-btn depot-mode active"
+                id="btn-depot"
+                onclick="setMode('depot')"
+              >
+                <span class="dot"></span> Place depot
+              </button>
+              <button
+                class="mode-btn point-mode"
+                id="btn-point"
+                onclick="setMode('point')"
+              >
+                <span class="dot"></span> Add stops
+              </button>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-label">Stats</div>
+            <div class="stats-grid">
+              <div class="stat-box">
+                <div class="val" id="stat-stops">0</div>
+                <div class="lbl">stops</div>
+              </div>
+              <div class="stat-box">
+                <div class="val" id="stat-dist">—</div>
+                <div class="lbl">makespan</div>
+              </div>
+              <div class="stat-box">
+                <div class="val" id="stat-k">1</div>
+                <div class="lbl">robots</div>
+              </div>
+              <div class="stat-box">
+                <div class="val" id="stat-total">—</div>
+                <div class="lbl">total dist</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-label">Robots K</div>
+            <div class="k-wrap">
+              <input
+                type="range"
+                id="k-slider"
+                min="1"
+                max="10"
+                value="1"
+                step="1"
+                oninput="onKChange(this.value)"
+              />
+              <div class="k-labels">
+                <span>1</span><span id="k-max-label">10</span>
+              </div>
+            </div>
+            <div class="k-desc" id="k-desc">1 robot covers all stops</div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-label">Algorithm phase</div>
+            <div class="phase-list">
+              <div class="phase-item" id="phase-0">
+                <span class="phase-dot"></span> Build MST
+              </div>
+              <div class="phase-item" id="phase-1">
+                <span class="phase-dot"></span> Double Edges
+              </div>
+              <div class="phase-item" id="phase-2">
+                <span class="phase-dot"></span> Euler Walk
+              </div>
+              <div class="phase-item" id="phase-3">
+                <span class="phase-dot"></span> Shortcut Tour
+              </div>
+              <div class="phase-item" id="phase-4">
+                <span class="phase-dot"></span> 2-Opt Uncrossing
+              </div>
+              <div class="phase-item" id="phase-5">
+                <span class="phase-dot"></span> K-Decompose
+              </div>
+            </div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-label">Speed</div>
+            <div class="speed-wrap">
+              <label>slow</label>
+              <input
+                type="range"
+                id="speed"
+                min="1"
+                max="5"
+                value="3"
+                step="1"
+              />
+              <label>fast</label>
+            </div>
+          </div>
+
+          <div class="panel action-group">
+            <button
+              class="btn btn-run"
+              id="btn-run"
+              onclick="runSolve()"
+              disabled
+            >
+              Run →
+            </button>
+            <button class="btn btn-clear" onclick="clearAll()">
+              Clear all
+            </button>
+            <button class="btn btn-pareto" onclick="clearPareto()">
+              Clear Pareto
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- BOTTOM: Pareto frontier -->
+      <div class="pareto-wrap">
+        <div class="pareto-header">
+          <span class="panel-label" style="margin: 0"
+            >Pareto frontier — K vs makespan</span
+          >
+          <span class="pareto-hint" id="pareto-hint"
+            >run the solver at different K values to build the frontier</span
+          >
+        </div>
+        <canvas id="pareto-canvas" height="160"></canvas>
+      </div>
+
+      <footer>
+        <span id="status-bar">place a depot to begin</span>
+        <span>double-tree · 2-approx · greedy K-cut</span>
+      </footer>
+    </div>
+
+    <script src="main.js"></script>
+  </body>
+</html>
