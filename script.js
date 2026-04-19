@@ -14,6 +14,8 @@ let mode = 'depot';
 let animating = false;
 let mstEdges = [];
 let currentK = 1;
+let paused = false;
+let pauseResolver = null;
 let paretoPoints = [];   // { k, makespan }
 
 // ─── Robot colors (up to 10) ─────────────────────────────────────────────────
@@ -203,35 +205,6 @@ function buildMST(nodes) {
   return edges;
 }
 
-// ─── K-decomposition ──────────────────────────────────────────────────────────
-// Cut K-1 longest edges from MST → K subtrees, each containing the depot (idx 0)
-// Returns array of K arrays of node indices (each includes depot)
-// Get connected components of a node-set given a set of cut edge indices
-function getComponents(nodes, edges, cutSet) {
-  const adj = Array.from({ length: nodes.length }, () => []);
-  edges.forEach((e, i) => {
-    if (cutSet.has(i)) return;
-    adj[e.u].push(e.v);
-    adj[e.v].push(e.u);
-  });
-  const visited = new Array(nodes.length).fill(false);
-  const components = [];
-  for (let start = 0; start < nodes.length; start++) {
-    if (visited[start]) continue;
-    const comp = [];
-    const stack = [start];
-    while (stack.length) {
-      const v = stack.pop();
-      if (visited[v]) continue;
-      visited[v] = true;
-      comp.push(v);
-      for (const nb of adj[v]) if (!visited[nb]) stack.push(nb);
-    }
-    components.push(comp);
-  }
-  return components;
-}
-
 function splitTour(nodes, tour, K) {
   const deliveries = tour.slice(1); // remove depot (0)
   const n = deliveries.length;
@@ -322,10 +295,33 @@ function tourDistance(nodes, tourOrder) {
 }
 
 // ─── Sleep ────────────────────────────────────────────────────────────────────
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+async function sleep(ms) {
+  const start = Date.now();
+
+  while (Date.now() - start < ms) {
+    if (paused) {
+      await new Promise(resolve => (pauseResolver = resolve));
+    }
+    await new Promise(r => setTimeout(r, 10));
+  }
+}
+
 function getDelay() {
   const s = parseInt(document.getElementById('speed').value);
   return [0, 700, 380, 200, 90, 25][s];
+}
+
+function togglePause() {
+  paused = !paused;
+
+  const btn = document.getElementById('btn-pause');
+  btn.textContent = paused ? 'Resume' : 'Pause';
+
+  // if resuming, unblock the animation
+  if (!paused && pauseResolver) {
+    pauseResolver();
+    pauseResolver = null;
+  }
 }
 
 // ─── Draw helpers ─────────────────────────────────────────────────────────────

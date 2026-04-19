@@ -91,7 +91,7 @@
                 <span>1</span><span id="k-max-label">10</span>
               </div>
             </div>
-            <div class="k-desc" id="k-desc">1 robot covers all stops</div>
+            <div class="k-desc" id="k-desc">1 robot</div>
           </div>
 
           <div class="panel">
@@ -120,17 +120,22 @@
 
           <div class="panel">
             <div class="panel-label">Speed</div>
+
             <div class="speed-wrap">
-              <label>slow</label>
-              <input
-                type="range"
-                id="speed"
-                min="1"
-                max="5"
-                value="3"
-                step="1"
-              />
-              <label>fast</label>
+              <div class="speed-control">
+                <label>1</label>
+                <input
+                  type="range"
+                  id="speed"
+                  min="1"
+                  max="5"
+                  value="3"
+                  step="1"
+                />
+                <label>5</label>
+              </div>
+
+              <button id="btn-pause" onclick="togglePause()">Pause</button>
             </div>
           </div>
 
