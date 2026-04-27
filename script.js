@@ -1,759 +1,1263 @@
-'use strict';
+"use strict";
+// STATE
+const map = document.getElementById("map");
+const mctx = map.getContext("2d");
+const pcan = document.getElementById("pareto");
+const pctx = pcan.getContext("2d");
+const wrap = map.parentElement;
 
-// ─── Canvas setup ────────────────────────────────────────────────────────────
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-const wrap = document.getElementById('canvas-wrap');
-const pCanvas = document.getElementById('pareto-canvas');
-const pCtx = pCanvas.getContext('2d');
-
-// ─── State ───────────────────────────────────────────────────────────────────
 let depot = null;
-let points = [];
-let mode = 'depot';
+let pts = [];
+let mode = "depot";
+let algo = "A";
+let K = 1;
 let animating = false;
-let mstEdges = [];
-let currentK = 1;
 let paused = false;
-let pauseResolver = null;
-let paretoPoints = [];   // { k, makespan }
+let pauseResolve = null;
 
-// ─── Robot colors (up to 10) ─────────────────────────────────────────────────
-const ROBOT_COLORS = [
-  '#7c6cff', '#4dffa0', '#ff6c8a', '#ffb84d', '#4dc8ff',
-  '#ff4df7', '#a0ff4d', '#ff8c4d', '#4dffed', '#c84dff'
-];
-const ROBOT_GLOW = [
-  'rgba(124,108,255,0.35)', 'rgba(77,255,160,0.35)', 'rgba(255,108,138,0.35)',
-  'rgba(255,184,77,0.35)',  'rgba(77,200,255,0.35)', 'rgba(255,77,247,0.35)',
-  'rgba(160,255,77,0.35)',  'rgba(255,140,77,0.35)', 'rgba(77,255,237,0.35)',
-  'rgba(200,77,255,0.35)'
+let frozenMST = null;
+let frozenTour = null;
+
+let paretoData = [];
+
+const RC = [
+  "#4488ff",
+  "#3dff9a",
+  "#ff4466",
+  "#f5a623",
+  "#cc44ff",
+  "#ff884d",
+  "#44ffee",
+  "#ffee44",
+  "#ff44bb",
+  "#88ff44",
 ];
 
-// ─── Resize ───────────────────────────────────────────────────────────────────
-function resize() {
+// Phase definitions per algo
+const PHASES_A = [
+  "Build MST (Prim's)",
+  "DFS preorder tour",
+  "2-opt convergence",
+  "Binary search makespan X",
+  "Greedy drone assignment",
+  "Uncross tours",
+];
+const PHASES_B = [
+  "Build MST (Prim's)",
+  "Balanced K-cut",
+  "NN tour per subtree",
+  "Or-opt local polish",
+];
+
+// RESIZE
+function resizeMap() {
   const r = wrap.getBoundingClientRect();
-  canvas.width = r.width;
-  canvas.height = r.height;
+  map.width = r.width;
+  map.height = r.height;
   redraw();
 }
-window.addEventListener('resize', resize);
-setTimeout(resize, 50);
+function resizePareto() {
+  const pw = document.querySelector(".pareto-wrap");
+  const r = pw.getBoundingClientRect();
+  const sz = r.height - 14 - 8 - 18;
+  pcan.width = r.width - 28;
+  pcan.height = Math.max(sz, 180);
+  drawPareto();
+}
+window.addEventListener("resize", () => {
+  resizeMap();
+  resizePareto();
+});
+setTimeout(() => {
+  resizeMap();
+  resizePareto();
+  buildPhaseUI();
+}, 60);
 
-// ─── Mode ─────────────────────────────────────────────────────────────────────
+// ALGO SWITCH
+function switchAlgo(a) {
+  algo = a;
+  document.getElementById("btnA").classList.toggle("active", a === "A");
+  document.getElementById("btnB").classList.toggle("active", a === "B");
+  document.getElementById("algolabel").textContent =
+    a === "A"
+      ? "Method A · MST + DFS + 2-opt → binary split + uncross"
+      : "Method B · MST → balanced K-cut → NN + Or-opt";
+  buildPhaseUI();
+}
+
+// PHASES UI
+function buildPhaseUI() {
+  const phases = algo === "A" ? PHASES_A : PHASES_B;
+  const el = document.getElementById("phases");
+  el.innerHTML = phases
+    .map(
+      (p, i) =>
+        `<div class="pitem" id="ph${i}"><span class="pdot"></span>${p}</div>`,
+    )
+    .join("");
+}
+function resetPhases() {
+  document
+    .querySelectorAll(".pitem")
+    .forEach((e) => e.classList.remove("active", "done"));
+}
+function setPhase(i, state) {
+  const el = document.getElementById(`ph${i}`);
+  if (!el) return;
+  el.classList.remove("active", "done");
+  if (state) el.classList.add(state);
+}
+
 function setMode(m) {
   mode = m;
-  document.getElementById('btn-depot').classList.toggle('active', m === 'depot');
-  document.getElementById('btn-point').classList.toggle('active', m === 'point');
+  document.getElementById("mDepot").classList.toggle("active", m === "depot");
+  document.getElementById("mPoint").classList.toggle("active", m === "point");
 }
 
-// ─── K slider ─────────────────────────────────────────────────────────────────
-function onKChange(val) {
-  currentK = parseInt(val);
-  document.getElementById('stat-k').textContent = currentK;
-  const n = points.length;
-  document.getElementById('k-desc').textContent =
-    currentK === 1
-      ? '1 robot'
-      : `${currentK} robots`;
-}
-
-function updateKMax() {
-  const maxK = Math.max(1, points.length);
-  const slider = document.getElementById('k-slider');
-  slider.max = maxK;
-  document.getElementById('k-max-label').textContent = maxK;
-  if (currentK > maxK) {
-    currentK = maxK;
-    slider.value = maxK;
-    document.getElementById('stat-k').textContent = maxK;
-  }
-}
-
-// ─── Click to place ───────────────────────────────────────────────────────────
-canvas.addEventListener('click', e => {
+map.addEventListener("click", (e) => {
   if (animating) return;
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
+  const r = map.getBoundingClientRect();
+  const x = e.clientX - r.left,
+    y = e.clientY - r.top;
 
-  if (mode === 'depot') {
+  if (mode === "depot") {
     depot = { x, y };
-    document.getElementById('overlay').classList.add('hidden');
-    setMode('point');
-    setStatus('depot placed — add delivery stops', '');
+    document.getElementById("hint").classList.add("gone");
+    setMode("point");
+    setStatus("depot placed — add stops", "");
   } else {
-    if (!depot) { setMode('depot'); return; }
-    points.push({ x, y });
-    document.getElementById('stat-stops').textContent = points.length;
+    if (!depot) {
+      setMode("depot");
+      return;
+    }
+    pts.push({ x, y });
+    document.getElementById("sv-stops").textContent = pts.length;
     updateKMax();
   }
-
-  mstEdges = [];
-  document.getElementById('stat-dist').textContent = '—';
-  document.getElementById('stat-total').textContent = '—';
-  document.getElementById('btn-run').disabled = (points.length < 2);
+  frozenMST = null;
+  frozenTour = null;
+  document.getElementById("sv-makespan").textContent = "—";
+  document.getElementById("sv-total").textContent = "—";
+  document.getElementById("btnRun").disabled = pts.length < 2;
   resetPhases();
   redraw();
 });
 
-// ─── Clear ────────────────────────────────────────────────────────────────────
+function onK(v) {
+  K = v;
+  document.getElementById("kval").textContent = K;
+  document.getElementById("sv-k").textContent = K;
+  document.getElementById("ksub").textContent =
+    K === 1 ? "1 drone" : `${K} drones`;
+}
+function updateKMax() {
+  const sl = document.getElementById("kslider");
+  const mx = Math.max(1, pts.length);
+  sl.max = mx;
+  if (K > mx) {
+    K = mx;
+    sl.value = mx;
+    onK(mx);
+  }
+}
+
 function clearAll() {
   if (animating) return;
-  depot = null; points = []; mstEdges = [];
-  document.getElementById('overlay').classList.remove('hidden');
-  document.getElementById('stat-stops').textContent = '0';
-  document.getElementById('stat-dist').textContent = '—';
-  document.getElementById('stat-total').textContent = '—';
-  document.getElementById('stat-k').textContent = '1';
-  document.getElementById('btn-run').disabled = true;
-  document.getElementById('k-slider').value = 1;
-  currentK = 1;
-  updateKMax();
+  depot = null;
+  pts = [];
+  frozenMST = null;
+  frozenTour = null;
+  K = 1;
+  document.getElementById("kslider").value = 1;
+  onK(1);
+  document.getElementById("sv-stops").textContent = "0";
+  document.getElementById("sv-makespan").textContent = "—";
+  document.getElementById("sv-total").textContent = "—";
+  document.getElementById("btnRun").disabled = true;
+  document.getElementById("hint").classList.remove("gone");
+  document.getElementById("dronelist").innerHTML = "";
   resetPhases();
-  clearRobotLegend();
-  setStatus('place a depot to begin', '');
-  setMode('depot');
+  setStatus("place a depot to begin", "");
+  setMode("depot");
   redraw();
 }
-
 function clearPareto() {
-  paretoPoints = [];
+  paretoData = [];
   drawPareto();
-  document.getElementById('pareto-hint').textContent =
-    'run the solver at different K values to build the frontier';
+  document.getElementById("statusbar").textContent =
+    "run solver at different K values to build frontier";
 }
 
-// ─── Status ───────────────────────────────────────────────────────────────────
 function setStatus(msg, cls) {
-  const el = document.getElementById('status-bar');
-  el.className = cls || '';
-  el.innerHTML = cls === 'active'
-    ? `<span class="running-dot"></span>${msg}`
-    : msg;
+  const el = document.getElementById("statusbar");
+  el.className = cls || "";
+  el.innerHTML =
+    cls === "running" ? `<span class="dot-run"></span>${msg}` : msg;
 }
 
-// ─── Phase helpers ────────────────────────────────────────────────────────────
-function resetPhases() {
-  for (let i = 0; i <= 5; i++) {
-    const el = document.getElementById(`phase-${i}`);
-    el.classList.remove('active', 'done');
+function togglePause() {
+  paused = !paused;
+  const btn = document.getElementById("pausebtn");
+  btn.textContent = paused ? "▶ resume" : "⏸ pause";
+  btn.classList.toggle("paused", paused);
+  if (!paused && pauseResolve) {
+    pauseResolve();
+    pauseResolve = null;
   }
 }
-function setPhase(i, state) {
-  const el = document.getElementById(`phase-${i}`);
-  el.classList.remove('active', 'done');
-  if (state) el.classList.add(state);
+
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
-
-// ─── Geometry ─────────────────────────────────────────────────────────────────
-function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
-
-function allNodes() { return depot ? [depot, ...points] : points; }
-
-// ─── 2-Opt Optimization ──────────────────────────────────────────────────────
-function optimize2Opt(nodes, tour) {
-  let improved = true;
-  let newTour = [...tour];
-  const n = newTour.length;
-
-  // Continue until no more improvements (crossings) are found
-  while (improved) {
-    improved = false;
-    for (let i = 1; i < n - 1; i++) {
-      for (let j = i + 1; j < n; j++) {
-        // Current edges: (i-1, i) and (j, j+1 mod n)
-        const a = nodes[newTour[i - 1]];
-        const b = nodes[newTour[i]];
-        const c = nodes[newTour[j]];
-        const d = nodes[newTour[(j + 1) % n]];
-
-        // If distance(a,c) + distance(b,d) < distance(a,b) + distance(c,d)
-        // then the edges cross or are sub-optimal.
-        const currentDist = dist(a, b) + dist(c, d);
-        const newDist = dist(a, c) + dist(b, d);
-
-        if (newDist < currentDist - 0.01) { // 0.01 to avoid floating point loops
-          // Reverse the segment from i to j
-          const segment = newTour.slice(i, j + 1).reverse();
-          newTour.splice(i, j - i + 1, ...segment);
-          improved = true;
-        }
-      }
-    }
+async function tick() {
+  if (paused) {
+    await new Promise((r) => {
+      pauseResolve = r;
+    });
   }
-  return newTour;
+}
+function delay() {
+  const s = +document.getElementById("speed").value;
+  return [0, 800, 450, 220, 100, 40, 8][s];
+}
+async function wait(extra = 0) {
+  await tick();
+  if (delay() > 0) await sleep(delay() + extra);
 }
 
-// ─── Prim's MST ───────────────────────────────────────────────────────────────
+function dist(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+function allNodes() {
+  return depot ? [depot, ...pts] : pts;
+}
+
+// PRIM'S MST
 function buildMST(nodes) {
-  const n = nodes.length;
-  const inTree = new Set([0]);
-  const edges = [];
+  const n = nodes.length,
+    inTree = new Set([0]),
+    edges = [];
   while (inTree.size < n) {
-    let best = null, bd = Infinity;
-    for (const u of inTree) {
+    let best = null,
+      bd = Infinity;
+    for (const u of inTree)
       for (let v = 0; v < n; v++) {
         if (inTree.has(v)) continue;
         const d = dist(nodes[u], nodes[v]);
-        if (d < bd) { bd = d; best = { u, v, d }; }
+        if (d < bd) {
+          bd = d;
+          best = { u, v, d };
+        }
       }
-    }
     edges.push(best);
     inTree.add(best.v);
   }
   return edges;
 }
 
-function splitTour(nodes, tour, K) {
-  const deliveries = tour.slice(1); // remove depot (0)
-  const n = deliveries.length;
-
-  const subsets = [];
-  const chunkSize = Math.ceil(n / K);
-
-  for (let i = 0; i < K; i++) {
-    const chunk = deliveries.slice(i * chunkSize, (i + 1) * chunkSize);
-    if (chunk.length > 0) {
-      subsets.push([0, ...chunk]); // add depot back
-    }
-  }
-
-  return subsets;
-}
-
-// Nearest-neighbor tour through a subset of nodes, starting from depot (idx 0).
-// Much better sub-tour quality than DFS walk order.
-function subtourNN(nodes, subset) {
-  const deliveries = subset.filter(v => v !== 0);
-  if (deliveries.length === 0) return [0];
-
-  const unvisited = new Set(deliveries);
-  const order = [0]; // start at depot
-  let current = 0;
-
-  while (unvisited.size > 0) {
-    let nearest = null, nd = Infinity;
-    for (const v of unvisited) {
-      const d = dist(nodes[current], nodes[v]);
-      if (d < nd) { nd = d; nearest = v; }
-    }
-    unvisited.delete(nearest);
-    order.push(nearest);
-    current = nearest;
-  }
-  return optimize2Opt(nodes, order);
-}
-
-async function animate2Opt(nodes, tour, robotColor) {
+// 2-OPT
+function twoOpt(nodes, order) {
+  const n = order.length;
   let improved = true;
-  let currentTour = [...tour];
-  const delay = () => sleep(getDelay());
-
   while (improved) {
     improved = false;
-    for (let i = 1; i < currentTour.length - 1; i++) {
-      for (let j = i + 1; j < currentTour.length; j++) {
-        const a = nodes[currentTour[i - 1]];
-        const b = nodes[currentTour[i]];
-        const c = nodes[currentTour[j]];
-        const d = nodes[currentTour[(j + 1) % currentTour.length]];
-
-        if (dist(a, c) + dist(b, d) < dist(a, b) + dist(c, d) - 0.01) {
-          // Perform swap
-          const segment = currentTour.slice(i, j + 1).reverse();
-          currentTour.splice(i, j - i + 1, ...segment);
-          
-          // Visualize the swap
-          redraw({ 
-            mst: mstEdges, 
-            subtours: [{ order: currentTour, color: robotColor }] 
-          });
-          
-          // Flash the new edges in a highlight color
-          drawEdge(a, c, '#ffffff', 3, 1);
-          drawEdge(b, d, '#ffffff', 3, 1);
-          
-          await delay();
+    for (let i = 0; i < n - 1; i++) {
+      for (let j = i + 2; j < n; j++) {
+        if (j === n - 1 && i === 0) continue;
+        const a = nodes[order[i]],
+          b = nodes[order[i + 1]];
+        const c = nodes[order[j]],
+          d = nodes[order[(j + 1) % n]];
+        const before = dist(a, b) + dist(c, d);
+        const after = dist(a, c) + dist(b, d);
+        if (after < before - 1e-10) {
+          order.slice(i + 1, j + 1).reverse();
           improved = true;
-          break; 
         }
       }
-      if (improved) break;
     }
   }
-  return currentTour;
+  return order;
 }
 
-// Compute tour distance (including return to start)
-function tourDistance(nodes, tourOrder) {
+// DFS PREORDER
+function dfsPreorder(nodes, edges) {
+  const adj = Array.from({ length: nodes.length }, () => []);
+  for (const e of edges) {
+    adj[e.u].push(e.v);
+    adj[e.v].push(e.u);
+  }
+  const vis = new Set(),
+    order = [];
+  function dfs(v) {
+    vis.add(v);
+    order.push(v);
+    for (const nb of adj[v]) if (!vis.has(nb)) dfs(nb);
+  }
+  dfs(0);
+  return order;
+}
+
+//  BINARY SEARCH SPLIT (Method A)
+function binarySearchSplit(nodes, tour, K) {
+  if (K === 1) return [tour];
+
+  function greedySplit(X) {
+    const segs = [];
+    let seg = [0],
+      cur = 0,
+      curDist = 0;
+
+    for (let i = 1; i < tour.length; i++) {
+      const nxt = tour[i];
+      const stepDist = dist(nodes[cur], nodes[nxt]);
+      const retDist = dist(nodes[nxt], nodes[0]); // cost to return home FROM nxt
+
+      if (curDist + stepDist + retDist <= X + 1e-10 || seg.length === 1) {
+        // Can add this stop and still return within budget
+        seg.push(nxt);
+        curDist += stepDist;
+        cur = nxt;
+      } else {
+        // Close out current drone, start new one
+        segs.push(seg);
+        seg = [0, nxt];
+        curDist = dist(nodes[0], nodes[nxt]);
+        cur = nxt;
+      }
+    }
+    segs.push(seg);
+    return segs;
+  }
+
+  // Find bounds for binary search
+  const nodes2 = nodes;
+  // Lower bound: longest single-stop cost (depot->stop->depot)
+  let lo = 0;
+  for (let i = 1; i < tour.length; i++) {
+    const c = dist(nodes[0], nodes[tour[i]]) * 2;
+    if (c > lo) lo = c;
+  }
+  // Upper bound: full tour cost
+  let hi = 0;
+  for (let i = 0; i < tour.length - 1; i++)
+    hi += dist(nodes[tour[i]], nodes[tour[i + 1]]);
+  hi += dist(nodes[tour[tour.length - 1]], nodes[tour[0]]);
+
+  // Binary search
+  for (let iter = 0; iter < 60; iter++) {
+    const mid = (lo + hi) / 2;
+    const segs = greedySplit(mid);
+    if (segs.length <= K) hi = mid;
+    else lo = mid;
+  }
+
+  return greedySplit(hi);
+}
+
+// UNCROSS (Method A)
+function findCrossings(nodes, seg) {
+  const n = seg.length;
+  for (let i = 0; i < n - 1; i++) {
+    for (let j = i + 2; j < n; j++) {
+      const a = nodes[seg[i]],
+        b = nodes[seg[i + 1]];
+      const c = nodes[seg[j]],
+        d = nodes[seg[(j + 1) % n]];
+      if (segmentsIntersect(a, b, c, d)) {
+        let l = i + 1,
+          r = j;
+        while (l < r) {
+          [seg[l], seg[r]] = [seg[r], seg[l]];
+          l++;
+          r--;
+        }
+      }
+    }
+  }
+  return seg;
+}
+
+function segmentsIntersect(a, b, c, d) {
+  const ccw = (P, Q, R) =>
+    (R.y - P.y) * (Q.x - P.x) > (Q.y - P.y) * (R.x - P.x);
+  return ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
+}
+
+//  BALANCED K-CUT (Method B)
+function getComponents(nodes, edges, cutSet) {
+  const adj = Array.from({ length: nodes.length }, () => []);
+  edges.forEach((e, i) => {
+    if (cutSet.has(i)) return;
+    adj[e.u].push(e.v);
+    adj[e.v].push(e.u);
+  });
+  const vis = new Array(nodes.length).fill(false),
+    comps = [];
+  for (let s = 0; s < nodes.length; s++) {
+    if (vis[s]) continue;
+    const comp = [],
+      stk = [s];
+    while (stk.length) {
+      const v = stk.pop();
+      if (vis[v]) continue;
+      vis[v] = true;
+      comp.push(v);
+      for (const nb of adj[v]) if (!vis[nb]) stk.push(nb);
+    }
+    comps.push(comp);
+  }
+  return comps;
+}
+
+function balancedKCut(nodes, edges, K) {
+  if (K <= 1) return new Set();
+  const cutSet = new Set();
+
+  for (let iter = 0; iter < K - 1; iter++) {
+    const comps = getComponents(nodes, edges, cutSet);
+
+    // CRITICAL: Filter out depot-only components
+    // They shouldn't exist, but if they do, merge them with largest delivery component
+    const validComps = comps.filter((c) => c.filter((v) => v !== 0).length > 0);
+
+    if (validComps.length === 0) break; // No more valid components to cut
+
+    // Find component with most delivery nodes
+    let target = null,
+      maxD = 0;
+    for (const comp of validComps) {
+      const deliveries = comp.filter((v) => v !== 0).length;
+      if (deliveries > maxD) {
+        maxD = deliveries;
+        target = comp;
+      }
+    }
+
+    if (!target || maxD <= 1) break;
+
+    // Find longest edge within this component
+    const cs = new Set(target);
+    let bestIdx = null,
+      bestD = -Infinity;
+    edges.forEach((e, i) => {
+      if (cutSet.has(i)) return;
+      if (cs.has(e.u) && cs.has(e.v) && e.d > bestD) {
+        bestD = e.d;
+        bestIdx = i;
+      }
+    });
+
+    if (bestIdx === null) break;
+
+    // Verify the cut doesn't create a depot-only component
+    const testCut = new Set(cutSet);
+    testCut.add(bestIdx);
+    const testComps = getComponents(nodes, edges, testCut);
+
+    // Check: no component with ONLY the depot (no delivery nodes, no access to any)
+    const hasBadComp = testComps.some((c) => {
+      const dels = c.filter((v) => v !== 0).length;
+      return dels === 0; // Depot-only or empty
+    });
+
+    if (!hasBadComp) {
+      cutSet.add(bestIdx);
+      continue;
+    }
+
+    // Try next best edges
+    let found = false;
+    const candidates = edges
+      .map((e, i) => ({ e, i }))
+      .filter(
+        ({ e, i }) =>
+          !cutSet.has(i) && cs.has(e.u) && cs.has(e.v) && i !== bestIdx,
+      )
+      .sort((a, b) => b.e.d - a.e.d);
+
+    for (const { i } of candidates) {
+      const tc2 = new Set(cutSet);
+      tc2.add(i);
+      const c2 = getComponents(nodes, edges, tc2);
+      const bad2 = c2.some((c) => c.filter((v) => v !== 0).length === 0);
+      if (!bad2) {
+        cutSet.add(i);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) break;
+  }
+  return cutSet;
+}
+
+//  NN TOUR (Method B, per subtree)
+function nnTour(nodes, subset) {
+  const deliveries = subset.filter((v) => v !== 0);
+  if (!deliveries.length) return [0];
+  const unvis = new Set(deliveries);
+  const order = [0];
+  let cur = 0;
+  while (unvis.size) {
+    let nearest = null,
+      nd = Infinity;
+    for (const v of unvis) {
+      const d = dist(nodes[cur], nodes[v]);
+      if (d < nd) {
+        nd = d;
+        nearest = v;
+      }
+    }
+    unvis.delete(nearest);
+    order.push(nearest);
+    cur = nearest;
+  }
+  return order;
+}
+
+// OR-OPT (Method B, per subtree) — O(m²)
+function orOpt(nodes, order) {
+  // order is [0, s1, ..., sm] — depot at front
+  // Try relocating each delivery node to every other position
+  const o = [...order];
+  let improved = true;
+  while (improved) {
+    improved = false;
+    for (let i = 1; i < o.length; i++) {
+      const node = o[i];
+      const prev = o[i - 1],
+        next = o[i + 1] || o[0]; // wrap to depot
+      // Cost of removing node i
+      const removeCost =
+        dist(nodes[prev], nodes[node]) +
+        dist(nodes[node], nodes[next]) -
+        dist(nodes[prev], nodes[next]);
+      // Try inserting between every other consecutive pair
+      let bestGain = -1e-10,
+        bestJ = -1;
+      for (let j = 1; j < o.length; j++) {
+        if (j === i || j === i - 1) continue;
+        const a = o[j],
+          b = o[j + 1] || o[0];
+        if (a === node || b === node) continue;
+        const insertCost =
+          dist(nodes[a], nodes[node]) +
+          dist(nodes[node], nodes[b]) -
+          dist(nodes[a], nodes[b]);
+        const gain = removeCost - insertCost;
+        if (gain > bestGain) {
+          bestGain = gain;
+          bestJ = j;
+        }
+      }
+      if (bestJ >= 0) {
+        o.splice(i, 1);
+        const insertAt = bestJ > i ? bestJ : bestJ + 1;
+        o.splice(insertAt, 0, node);
+        improved = true;
+        break;
+      }
+    }
+  }
+  return o;
+}
+
+function tourDist(nodes, order) {
+  if (order.length < 2) return 0;
   let d = 0;
-  for (let i = 0; i < tourOrder.length - 1; i++)
-    d += dist(nodes[tourOrder[i]], nodes[tourOrder[i + 1]]);
-  d += dist(nodes[tourOrder[tourOrder.length - 1]], nodes[tourOrder[0]]);
+  for (let i = 0; i < order.length - 1; i++)
+    d += dist(nodes[order[i]], nodes[order[i + 1]]);
+  d += dist(nodes[order[order.length - 1]], nodes[order[0]]);
   return d;
 }
 
-// ─── Sleep ────────────────────────────────────────────────────────────────────
-async function sleep(ms) {
-  const start = Date.now();
-
-  while (Date.now() - start < ms) {
-    if (paused) {
-      await new Promise(resolve => (pauseResolver = resolve));
-    }
-    await new Promise(r => setTimeout(r, 10));
-  }
-}
-
-function getDelay() {
-  const s = parseInt(document.getElementById('speed').value);
-  return [0, 700, 380, 200, 90, 25][s];
-}
-
-function togglePause() {
-  paused = !paused;
-
-  const btn = document.getElementById('btn-pause');
-  btn.textContent = paused ? 'Resume' : 'Pause';
-
-  // if resuming, unblock the animation
-  if (!paused && pauseResolver) {
-    pauseResolver();
-    pauseResolver = null;
-  }
-}
-
-// ─── Draw helpers ─────────────────────────────────────────────────────────────
-function drawDepot(x, y) {
-  ctx.save();
-  ctx.beginPath(); ctx.arc(x, y, 14, 0, Math.PI * 2);
-  ctx.strokeStyle = '#ffb84d'; ctx.lineWidth = 1.5; ctx.stroke();
-  ctx.beginPath(); ctx.arc(x, y, 8, 0, Math.PI * 2);
-  ctx.fillStyle = '#ffb84d'; ctx.fill();
-  ctx.fillStyle = '#0a0a0f';
-  ctx.font = 'bold 9px "DM Mono", monospace';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText('D', x, y);
-  ctx.restore();
-}
-
-function drawPoint(x, y, label, color = '#7c6cff', size = 7) {
-  ctx.save();
-  ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2);
-  ctx.fillStyle = color; ctx.fill();
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 1; ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,0.45)';
-  ctx.font = '9px "DM Mono", monospace';
-  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-  ctx.fillText(label, x, y - 14);
-  ctx.restore();
-}
-
-function drawEdge(a, b, color, width, alpha, dash = []) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-  ctx.strokeStyle = color; ctx.lineWidth = width;
-  ctx.setLineDash(dash); ctx.stroke();
-  ctx.restore();
-}
-
-function drawArrow(a, b, color, width, alpha) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  const dx = b.x - a.x, dy = b.y - a.y;
-  const len = Math.hypot(dx, dy);
-  if (len < 1) { ctx.restore(); return; }
-  const ux = dx / len, uy = dy / len;
-  ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x - ux * 10, b.y - uy * 10);
-  ctx.strokeStyle = color; ctx.lineWidth = width; ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(b.x - ux * 10, b.y - uy * 10);
-  ctx.lineTo(b.x - ux * 17 + uy * 5, b.y - uy * 17 - ux * 5);
-  ctx.lineTo(b.x - ux * 17 - uy * 5, b.y - uy * 17 + ux * 5);
-  ctx.closePath(); ctx.fillStyle = color; ctx.fill();
-  ctx.restore();
-}
-
-// ─── Full redraw (static state) ───────────────────────────────────────────────
-function redraw(opts = {}) {
+// DRAWING
+function redraw(state = {}) {
   const {
     mst = [],
-    subtours = [],   // array of { order, color } — each robot's tour
-    highlightEdge = -1,
-    showDoubled = false,
-    showMST = true,
+    showDouble = false,
     eulerEdges = [],
-  } = opts;
+    subtours = [], // [{order,color}]
+    cutEdges = [], // edge indices that are cut
+    flashEdge = null, // {u,v} to flash bright
+    highlightNodes = [], // node indices to highlight
+  } = state;
 
   const nodes = allNodes();
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  mctx.clearRect(0, 0, map.width, map.height);
 
   // MST edges
-  if (showMST) {
-    for (const e of mst) {
-      const a = nodes[e.u], b = nodes[e.v];
-      drawEdge(a, b, 'rgba(124,108,255,0.25)', 1.5, 1);
-    }
+  for (const e of mst) {
+    const isCut = cutEdges.includes(mst.indexOf(e));
+    drawLine(
+      nodes[e.u],
+      nodes[e.v],
+      isCut ? "rgba(255,68,102,0.4)" : "rgba(68,136,255,0.2)",
+      isCut ? 2 : 1.5,
+      isCut ? [5, 4] : [],
+    );
   }
 
-  // Doubled edges (phase 1)
-  if (showDoubled) {
+  // Doubled edges (phase 1B)
+  if (showDouble) {
     for (const e of mst) {
-      const a = nodes[e.u], b = nodes[e.v];
-      const dx = b.x - a.x, dy = b.y - a.y;
-      const len = Math.hypot(dx, dy);
-      const nx = -dy / len * 3, ny = dx / len * 3;
-      ctx.save(); ctx.globalAlpha = 0.4;
-      ctx.beginPath();
-      ctx.moveTo(a.x + nx, a.y + ny); ctx.lineTo(b.x + nx, b.y + ny);
-      ctx.strokeStyle = '#ff6c8a'; ctx.lineWidth = 1.5; ctx.setLineDash([4, 4]); ctx.stroke();
-      ctx.restore();
+      const a = nodes[e.u],
+        b = nodes[e.v];
+      const dx = b.x - a.x,
+        dy = b.y - a.y,
+        len = Math.hypot(dx, dy);
+      const nx = (-dy / len) * 3,
+        ny = (dx / len) * 3;
+      mctx.save();
+      mctx.globalAlpha = 0.35;
+      mctx.beginPath();
+      mctx.moveTo(a.x + nx, a.y + ny);
+      mctx.lineTo(b.x + nx, b.y + ny);
+      mctx.strokeStyle = "#cc44ff";
+      mctx.lineWidth = 1.5;
+      mctx.setLineDash([3, 4]);
+      mctx.stroke();
+      mctx.restore();
     }
   }
 
   // Euler walk edges
-  for (let i = 0; i < eulerEdges.length; i++) {
-    const [u, v] = eulerEdges[i];
-    const a = nodes[u], b = nodes[v];
-    drawEdge(a, b, 'rgba(255,184,77,0.55)', 1.5, 1, [3, 3]);
+  for (const [u, v] of eulerEdges) {
+    drawLine(nodes[u], nodes[v], "rgba(245,166,35,0.5)", 1.5, [3, 4]);
   }
 
-  // Robot sub-tours
+  // Flash edge
+  if (flashEdge) {
+    drawLine(nodes[flashEdge.u], nodes[flashEdge.v], "#4488ff", 3, []);
+  }
+
+  // Sub-tours (arrows)
   for (const { order, color } of subtours) {
     if (order.length < 2) continue;
     const full = [...order, order[0]];
     for (let i = 0; i < full.length - 1; i++) {
-      const a = nodes[full[i]], b = nodes[full[i + 1]];
-      drawArrow(a, b, color, 2, 0.85);
+      drawArrow(nodes[full[i]], nodes[full[i + 1]], color, 2, 0.9);
     }
+  }
+
+  // Highlight nodes
+  for (const ni of highlightNodes) {
+    const p = nodes[ni];
+    mctx.save();
+    mctx.beginPath();
+    mctx.arc(p.x, p.y, 12, 0, Math.PI * 2);
+    mctx.strokeStyle = algo === "A" ? "#f5a623" : "#3dff9a";
+    mctx.lineWidth = 1.5;
+    mctx.globalAlpha = 0.5;
+    mctx.stroke();
+    mctx.restore();
   }
 
   // Delivery points
-  points.forEach((p, i) => {
-    // Find which robot owns this point
-    let color = '#7c6cff';
-    for (const { order, color: c } of subtours) {
-      if (order.includes(i + 1)) { color = c; break; }
-    }
-    drawPoint(p.x, p.y, i + 1, color);
-  });
+  const ownedBy = new Array(nodes.length).fill(null);
+  for (const { order, color } of subtours)
+    for (const v of order) ownedBy[v] = color;
+
+  for (let i = 1; i < nodes.length; i++) {
+    const p = nodes[i],
+      color = ownedBy[i] || "#4488ff";
+    drawDot(p, color, 7, `${i}`);
+  }
 
   // Depot
-  if (depot) drawDepot(depot.x, depot.y);
+  if (depot) drawDepot(depot);
 }
 
-// ─── Robot legend ─────────────────────────────────────────────────────────────
-function updateRobotLegend(subtours) {
-  const nodes = allNodes();
-  
-  // Inject legend below K slider
-  let el = document.getElementById('robot-legend');
-  if (!el) {
-    el = document.createElement('div');
-    el.id = 'robot-legend';
-    el.className = 'robot-legend';
-    document.getElementById('k-slider').closest('.panel').appendChild(el);
+function drawLine(a, b, color, width, dash = []) {
+  mctx.save();
+  mctx.beginPath();
+  mctx.moveTo(a.x, a.y);
+  mctx.lineTo(b.x, b.y);
+  mctx.strokeStyle = color;
+  mctx.lineWidth = width;
+  mctx.setLineDash(dash);
+  mctx.stroke();
+  mctx.restore();
+}
+
+function drawArrow(a, b, color, width, alpha = 1) {
+  mctx.save();
+  mctx.globalAlpha = alpha;
+  const dx = b.x - a.x,
+    dy = b.y - a.y,
+    len = Math.hypot(dx, dy);
+  if (len < 1) {
+    mctx.restore();
+    return;
   }
-
-  el.innerHTML = subtours.map((s, i) => {
-    const stopCount = s.order.filter(v => v !== 0).length;
-    const distance = Math.round(tourDistance(nodes, s.order));
-    
-    return `
-      <div class="robot-tag">
-        <span class="robot-swatch" style="background:${s.color}"></span>
-        R${i + 1} · ${stopCount} stops · ${distance} units
-      </div>`;
-  }).join('');
+  const ux = dx / len,
+    uy = dy / len;
+  mctx.beginPath();
+  mctx.moveTo(a.x, a.y);
+  mctx.lineTo(b.x - ux * 9, b.y - uy * 9);
+  mctx.strokeStyle = color;
+  mctx.lineWidth = width;
+  mctx.setLineDash([]);
+  mctx.stroke();
+  mctx.beginPath();
+  mctx.moveTo(b.x - ux * 9, b.y - uy * 9);
+  mctx.lineTo(b.x - ux * 16 + uy * 5, b.y - uy * 16 - ux * 5);
+  mctx.lineTo(b.x - ux * 16 - uy * 5, b.y - uy * 16 + ux * 5);
+  mctx.closePath();
+  mctx.fillStyle = color;
+  mctx.fill();
+  mctx.restore();
 }
 
-function clearRobotLegend() {
-  const el = document.getElementById('robot-legend');
-  if (el) el.innerHTML = '';
+function drawDot(p, color, r, label) {
+  mctx.save();
+  mctx.beginPath();
+  mctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+  mctx.fillStyle = color;
+  mctx.fill();
+  mctx.strokeStyle = "rgba(0,0,0,0.4)";
+  mctx.lineWidth = 1;
+  mctx.stroke();
+  if (label) {
+    mctx.fillStyle = "rgba(255,255,255,0.4)";
+    mctx.font = "9px JetBrains Mono,monospace";
+    mctx.textAlign = "center";
+    mctx.textBaseline = "middle";
+    mctx.fillText(label, p.x, p.y - 15);
+  }
+  mctx.restore();
 }
 
-// ─── Pareto frontier ──────────────────────────────────────────────────────────
+function drawDepot(p) {
+  mctx.save();
+  mctx.beginPath();
+  mctx.arc(p.x, p.y, 13, 0, Math.PI * 2);
+  mctx.strokeStyle = "#f5a623";
+  mctx.lineWidth = 1.5;
+  mctx.stroke();
+  mctx.beginPath();
+  mctx.arc(p.x, p.y, 7, 0, Math.PI * 2);
+  mctx.fillStyle = "#f5a623";
+  mctx.fill();
+  mctx.fillStyle = "#08080e";
+  mctx.font = "bold 8px JetBrains Mono,monospace";
+  mctx.textAlign = "center";
+  mctx.textBaseline = "middle";
+  mctx.fillText("D", p.x, p.y);
+  mctx.restore();
+}
+
+// PARETO CHART
 function recordPareto(k, makespan) {
-  // Keep only the best (lowest) makespan per K
-  const existing = paretoPoints.find(p => p.k === k);
-  if (existing) {
-    if (makespan < existing.makespan) existing.makespan = makespan;
-  } else {
-    paretoPoints.push({ k, makespan });
-  }
-  paretoPoints.sort((a, b) => a.k - b.k);
+  const ex = paretoData.find((p) => p.k === k && p.algo === algo);
+  if (ex) {
+    if (makespan < ex.makespan) ex.makespan = makespan;
+  } else paretoData.push({ k, makespan, algo });
+  paretoData.sort((a, b) => a.k - b.k || a.algo.localeCompare(b.algo));
   drawPareto();
 }
 
 function drawPareto() {
-  const W = pCanvas.width, H = pCanvas.height;
-  pCtx.clearRect(0, 0, W, H);
+  const W = pcan.width,
+    H = pcan.height;
+  pctx.clearRect(0, 0, W, H);
 
-  const pad = { l: 44, r: 20, t: 16, b: 36 };
-  const iw = W - pad.l - pad.r;
-  const ih = H - pad.t - pad.b;
+  // bg
+  pctx.fillStyle = "#0f0f18";
+  pctx.beginPath();
+  pctx.roundRect(0, 0, W, H, 6);
+  pctx.fill();
 
-  // Background
-  pCtx.fillStyle = '#1a1a24';
-  pCtx.beginPath();
-  pCtx.roundRect(0, 0, W, H, 6);
-  pCtx.fill();
-
-  if (paretoPoints.length === 0) {
-    pCtx.fillStyle = '#6b6b80';
-    pCtx.font = '11px "DM Mono", monospace';
-    pCtx.textAlign = 'center';
-    pCtx.fillText('no data yet — run solver to plot points', W / 2, H / 2);
+  if (!paretoData.length) {
+    pctx.fillStyle = "#5a5a72";
+    pctx.font = "11px JetBrains Mono,monospace";
+    pctx.textAlign = "center";
+    pctx.textBaseline = "middle";
+    pctx.fillText("no data yet", W / 2, H / 2);
     return;
   }
 
-  const kVals = paretoPoints.map(p => p.k);
-  const msVals = paretoPoints.map(p => p.makespan);
-  const minK = 1, maxK = Math.max(...kVals, 2);
-  const minMs = 0, maxMs = Math.max(...msVals) * 1.15;
+  const pad = { l: 48, r: 20, t: 20, b: 40 };
+  const iw = W - pad.l - pad.r,
+    ih = H - pad.t - pad.b;
 
-  function px(k) { return pad.l + ((k - minK) / (maxK - minK || 1)) * iw; }
-  function py(ms) { return pad.t + ih - ((ms - minMs) / (maxMs - minMs || 1)) * ih; }
+  const kVals = paretoData.map((p) => p.k);
+  const msVals = paretoData.map((p) => p.makespan);
+  const minK = 1,
+    maxK = Math.max(...kVals, 2);
+  const minMs = 0,
+    maxMs = Math.max(...msVals) * 1.15;
 
-  // Grid lines
-  pCtx.strokeStyle = 'rgba(255,255,255,0.05)';
-  pCtx.lineWidth = 1;
+  const px = (k) => pad.l + ((k - minK) / (maxK - minK || 1)) * iw;
+  const py = (ms) => pad.t + ih - ((ms - minMs) / (maxMs - minMs || 1)) * ih;
+
+  // grid
+  pctx.strokeStyle = "rgba(255,255,255,0.04)";
+  pctx.lineWidth = 1;
   for (let i = 0; i <= 4; i++) {
     const y = pad.t + (ih / 4) * i;
-    pCtx.beginPath(); pCtx.moveTo(pad.l, y); pCtx.lineTo(pad.l + iw, y); pCtx.stroke();
+    pctx.beginPath();
+    pctx.moveTo(pad.l, y);
+    pctx.lineTo(pad.l + iw, y);
+    pctx.stroke();
     const val = Math.round(maxMs - (maxMs / 4) * i);
-    pCtx.fillStyle = '#6b6b80';
-    pCtx.font = '9px "DM Mono", monospace';
-    pCtx.textAlign = 'right';
-    pCtx.fillText(val, pad.l - 5, y + 3);
+    pctx.fillStyle = "#ffffff";
+    pctx.font = "9px JetBrains Mono,monospace";
+    pctx.color = "#5a5a72";
+    pctx.textAlign = "right";
+    pctx.textBaseline = "middle";
+    pctx.fillText(val, pad.l - 5, y);
   }
+  // x labels
+  pctx.textAlign = "center";
+  pctx.fillStyle = "#ffffff";
+  pctx.font = "9px JetBrains Mono,monospace";
+  for (let k = minK; k <= maxK; k++) {
+    pctx.fillText(`K=${k}`, px(k), pad.t + ih + 16);
+  }
+  // axis labels
+  pctx.fillStyle = "#ffffff";
+  pctx.font = "9px JetBrains Mono,monospace";
+  pctx.textAlign = "center";
+  pctx.fillText("drones (K)", pad.l + iw / 2, H - 4);
+  pctx.save();
+  pctx.translate(12, pad.t + ih / 2);
+  pctx.rotate(-Math.PI / 2);
+  pctx.fillText("makespan", 0, 0);
+  pctx.restore();
 
-  // X axis labels
-  pCtx.textAlign = 'center';
-  pCtx.fillStyle = '#6b6b80';
-  pCtx.font = '9px "DM Mono", monospace';
-  paretoPoints.forEach(p => {
-    pCtx.fillText(`K=${p.k}`, px(p.k), pad.t + ih + 18);
+  // draw lines per algo
+  ["A", "B"].forEach((a) => {
+    const pts = paretoData
+      .filter((p) => p.algo === a)
+      .sort((x, y) => x.k - y.k);
+    if (pts.length < 2) return;
+    const color = a === "A" ? "rgba(68,136,255,0.35)" : "rgba(61,255,154,0.35)";
+    pctx.beginPath();
+    pctx.moveTo(px(pts[0].k), py(pts[0].makespan));
+    for (let i = 1; i < pts.length; i++)
+      pctx.lineTo(px(pts[i].k), py(pts[i].makespan));
+    pctx.strokeStyle = color;
+    pctx.lineWidth = 1.5;
+    pctx.setLineDash([4, 4]);
+    pctx.stroke();
+    pctx.setLineDash([]);
   });
 
-  // Axis labels
-  pCtx.fillStyle = '#6b6b80';
-  pCtx.font = '10px "DM Mono", monospace';
-  pCtx.textAlign = 'center';
-  pCtx.fillText('robots (K)', pad.l + iw / 2, H - 4);
-  pCtx.save();
-  pCtx.translate(11, pad.t + ih / 2);
-  pCtx.rotate(-Math.PI / 2);
-  pCtx.fillText('makespan', 0, 0);
-  pCtx.restore();
-
-  // Connecting line
-  if (paretoPoints.length > 1) {
-    pCtx.beginPath();
-    pCtx.moveTo(px(paretoPoints[0].k), py(paretoPoints[0].makespan));
-    for (let i = 1; i < paretoPoints.length; i++) {
-      pCtx.lineTo(px(paretoPoints[i].k), py(paretoPoints[i].makespan));
-    }
-    pCtx.strokeStyle = 'rgba(124,108,255,0.4)';
-    pCtx.lineWidth = 1.5;
-    pCtx.setLineDash([4, 4]);
-    pCtx.stroke();
-    pCtx.setLineDash([]);
+  // dots
+  for (const p of paretoData) {
+    const x = px(p.k),
+      y = py(p.makespan);
+    const color = p.algo === "A" ? "#4488ff" : "#3dff9a";
+    pctx.beginPath();
+    pctx.arc(x, y, 6, 0, Math.PI * 2);
+    pctx.fillStyle = color + "30";
+    pctx.fill();
+    pctx.beginPath();
+    pctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    pctx.fillStyle = color;
+    pctx.fill();
+    pctx.fillStyle = color;
+    pctx.font = "9px JetBrains Mono,monospace";
+    pctx.textAlign = "center";
+    pctx.fillText(Math.round(p.makespan), x, y - 12);
   }
-
-  // Points
-  paretoPoints.forEach((p, i) => {
-    const x = px(p.k), y = py(p.makespan);
-    const color = ROBOT_COLORS[(p.k - 1) % ROBOT_COLORS.length];
-    // glow
-    pCtx.beginPath(); pCtx.arc(x, y, 7, 0, Math.PI * 2);
-    pCtx.fillStyle = color.replace(')', ', 0.2)').replace('rgb', 'rgba'); pCtx.fill();
-    // dot
-    pCtx.beginPath(); pCtx.arc(x, y, 4, 0, Math.PI * 2);
-    pCtx.fillStyle = color; pCtx.fill();
-    // value label
-    pCtx.fillStyle = color;
-    pCtx.font = '10px "DM Mono", monospace';
-    pCtx.textAlign = 'center';
-    pCtx.fillText(Math.round(p.makespan), x, y - 12);
-  });
-
-  document.getElementById('pareto-hint').textContent =
-    `${paretoPoints.length} point${paretoPoints.length !== 1 ? 's' : ''} plotted — change K and run again to extend`;
 }
 
-// Resize pareto canvas
-function resizePareto() {
-  const w = pCanvas.parentElement.getBoundingClientRect().width - 32;
-  pCanvas.width = Math.max(w, 200);
-  drawPareto();
+function updateDroneList(subtours, nodes) {
+  const el = document.getElementById("dronelist");
+  el.innerHTML = subtours
+    .map((s, i) => {
+      const stops = s.order.filter((v) => v !== 0).length;
+      const d = Math.round(tourDist(nodes, s.order));
+      return `<div class="ritem">
+      <span class="rswatch" style="background:${s.color}"></span>
+      <span class="rname">R${i + 1}</span>
+      <span class="rstops">${stops} stops</span>
+      <span class="rdist">${d}u</span>
+    </div>`;
+    })
+    .join("");
 }
-window.addEventListener('resize', resizePareto);
-setTimeout(resizePareto, 80);
 
-// ─── Main solve ───────────────────────────────────────────────────────────────
+// MAIN SOLVE
 async function runSolve() {
-  if (animating || !depot || points.length < 2) return;
+  if (animating || !depot || pts.length < 2) return;
   animating = true;
-  document.getElementById('btn-run').disabled = true;
+  paused = false;
+  document.getElementById("btnRun").disabled = true;
   resetPhases();
-  clearRobotLegend();
-  document.getElementById('stat-dist').textContent = '—';
-  document.getElementById('stat-total').textContent = '—';
+  document.getElementById("dronelist").innerHTML = "";
+  document.getElementById("sv-makespan").textContent = "—";
+  document.getElementById("sv-total").textContent = "—";
 
-  const nodes = allNodes();
-  const K = currentK;
-  const delay = () => sleep(getDelay());
-
-  // ── Phase 0: Build MST ───────────────────────────────────────────────────
-  setPhase(0, 'active');
-  setStatus('building minimum spanning tree…', 'active');
-
-  const builtEdges = [];
-  const inTree = new Set([0]);
-  redraw();
-  await delay();
-
-  while (inTree.size < nodes.length) {
-    let best = null, bd = Infinity;
-    for (const u of inTree) {
-      for (let v = 0; v < nodes.length; v++) {
-        if (inTree.has(v)) continue;
-        const d = dist(nodes[u], nodes[v]);
-        if (d < bd) { bd = d; best = { u, v, d }; }
-      }
-    }
-    builtEdges.push(best);
-    inTree.add(best.v);
-
-    redraw({ mst: builtEdges });
-    // Flash new edge
-    const a = nodes[best.u], b = nodes[best.v];
-    ctx.save(); ctx.globalAlpha = 0.9;
-    ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y);
-    ctx.strokeStyle = '#7c6cff'; ctx.lineWidth = 3; ctx.stroke();
-    ctx.restore();
-    await delay();
-  }
-
-  mstEdges = builtEdges;
-  setPhase(0, 'done');
-  await sleep(150);
-
-  // ── Phase 1: Double edges ────────────────────────────────────────────────
-  setPhase(1, 'active');
-  setStatus('doubling all MST edges…', 'active');
-  redraw({ mst: mstEdges, showDoubled: true });
-  await sleep(getDelay() * 2 + 200);
-  setPhase(1, 'done');
-  await sleep(150);
-
-  // ── Phase 2: Euler walk (DFS preorder on full MST) ───────────────────────
-  setPhase(2, 'active');
-  setStatus('computing Euler walk via DFS…', 'active');
-
-  const adj = Array.from({ length: nodes.length }, () => []);
-  for (const e of mstEdges) { adj[e.u].push(e.v); adj[e.v].push(e.u); }
-  const visited0 = new Set();
-  const walkOrder = [];
-  function dfs0(v) { visited0.add(v); walkOrder.push(v); for (const nb of adj[v]) if (!visited0.has(nb)) dfs0(nb); }
-  dfs0(0);
-
-  const eulerAnim = [];
-  for (let i = 0; i < walkOrder.length - 1; i++) {
-    eulerAnim.push([walkOrder[i], walkOrder[i + 1]]);
-    redraw({ mst: mstEdges, eulerEdges: [...eulerAnim] });
-    // Highlight current node
-    const nd = nodes[walkOrder[i + 1]];
-    ctx.save(); ctx.beginPath(); ctx.arc(nd.x, nd.y, 11, 0, Math.PI * 2);
-    ctx.strokeStyle = '#ffb84d'; ctx.lineWidth = 1.5; ctx.globalAlpha = 0.6; ctx.stroke();
-    ctx.restore();
-    await delay();
-  }
-
-  setPhase(2, 'done');
-  await sleep(150);
-
-  // ── Phase 3: Shortcut to Hamiltonian tour ───────────────────────────────
-  setPhase(3, 'active');
-  setStatus('shortcutting repeated visits…', 'active');
-
-  let shortcut = [...new Set(walkOrder)];
-  // Animate building the shortcut tour
-  const buildingTour = [{ order: [shortcut[0]], color: ROBOT_COLORS[0] }];
-  for (let i = 1; i < shortcut.length; i++) {
-    buildingTour[0].order = shortcut.slice(0, i + 1);
-    redraw({ mst: mstEdges, subtours: buildingTour });
-    await delay();
-  }
-
-  setPhase(3, 'done');
-  await sleep(150);
-
-  // ── Phase 4: 2-Opt Uncrossing  ─────────────────────────────────────
-  setPhase(4, 'active');
-  setStatus('eliminating edge crossings…', 'active');
-
-  shortcut = await animate2Opt(nodes, shortcut, ROBOT_COLORS[0]);
-
-  setPhase(4, 'done');
-  await sleep(150);
-
-  // ── Phase 5: K-decomposition ─────────────────────────────────────────────
-  setPhase(5, 'active');
-  if (K === 1) {
-    setStatus('single robot — no decomposition needed', 'active');
-  } else {
-    setStatus(`decomposing into ${K} robot routes…`, 'active');
-  }
-
-  const subsets = splitTour(nodes, shortcut, K);
-
-  // Animate each robot's route one by one
-  const finalSubtours = [];
-  for (let ri = 0; ri < subsets.length; ri++) {
-    const color = ROBOT_COLORS[ri % ROBOT_COLORS.length];
-    const order = subtourNN(nodes, subsets[ri]);
-    finalSubtours.push({ order, color });
-
-    // Animate this robot's path step by step
-    for (let step = 2; step <= order.length; step++) {
-      redraw({ mst: mstEdges, subtours: [
-        ...finalSubtours.slice(0, ri),
-        { order: order.slice(0, step), color },
-        ...finalSubtours.slice(ri + 1)
-      ]});
-      await delay();
-    }
-    // Flash return-to-depot arc
-    redraw({ mst: mstEdges, subtours: finalSubtours });
-    await delay();
-  }
-
-  // Final render with cut edges highlighted
-  redraw({ mst: mstEdges, subtours: finalSubtours, showMST: false });
-
-  // Compute stats
-  const subtourDists = finalSubtours.map(s => tourDistance(nodes, s.order));
-  const makespan = Math.max(...subtourDists);
-  const totalDist = subtourDists.reduce((a, b) => a + b, 0);
-
-  document.getElementById('stat-dist').textContent = Math.round(makespan);
-  document.getElementById('stat-total').textContent = Math.round(totalDist);
-
-  setPhase(5, 'done');
-  setStatus(
-    K === 1
-      ? `tour complete — makespan ${Math.round(makespan)} units`
-      : `${K} robots — makespan ${Math.round(makespan)} · total ${Math.round(totalDist)}`,
-    'done'
-  );
-
-  updateRobotLegend(finalSubtours);
-  recordPareto(K, makespan);
+  if (algo === "A") await solveA();
+  else await solveB();
 
   animating = false;
-  document.getElementById('btn-run').disabled = false;
+  document.getElementById("btnRun").disabled = false;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  METHOD A: MST → DFS → 2-opt → binary split → uncross
+// ═══════════════════════════════════════════════════════════
+async function solveA() {
+  const nodes = allNodes();
+
+  // ── Phase 0: MST ─────────────────────────────────────────
+  setPhase(0, "active");
+  setStatus("building MST…", "running");
+
+  let mst = frozenMST;
+  if (!mst) {
+    mst = [];
+    const inTree = new Set([0]);
+    redraw({ mst });
+    await wait();
+    while (inTree.size < nodes.length) {
+      let best = null,
+        bd = Infinity;
+      for (const u of inTree)
+        for (let v = 0; v < nodes.length; v++) {
+          if (inTree.has(v)) continue;
+          const d = dist(nodes[u], nodes[v]);
+          if (d < bd) {
+            bd = d;
+            best = { u, v, d };
+          }
+        }
+      mst.push(best);
+      inTree.add(best.v);
+      redraw({ mst, flashEdge: { u: best.u, v: best.v } });
+      await wait();
+    }
+    frozenMST = mst;
+  } else {
+    // already frozen, just show it
+    redraw({ mst });
+    await wait(300);
+    setStatus("MST loaded from cache", "running");
+  }
+  setPhase(0, "done");
+  await sleep(150);
+
+  // ── Phase 1: DFS ─────────────────────────────────────────
+  setPhase(1, "active");
+  setStatus("DFS preorder walk…", "running");
+
+  let tour = frozenTour;
+  if (!tour) {
+    const walk = dfsPreorder(nodes, mst);
+    // Animate the walk
+    const eulerEdges = [];
+    for (let i = 0; i < walk.length - 1; i++) {
+      eulerEdges.push([walk[i], walk[i + 1]]);
+      redraw({
+        mst,
+        eulerEdges: [...eulerEdges],
+        highlightNodes: [walk[i + 1]],
+      });
+      await wait();
+    }
+    tour = [...new Set(walk)];
+    setPhase(1, "done");
+    await sleep(150);
+
+    // ── Phase 2: 2-opt ───────────────────────────────────────
+    setPhase(2, "active");
+    setStatus("2-opt convergence…", "running");
+
+    // Animated 2-opt: show each improvement
+    const n = tour.length;
+    let improved = true,
+      pass = 0;
+    while (improved) {
+      improved = false;
+      pass++;
+      for (let i = 0; i < n - 1; i++) {
+        for (let j = i + 2; j < n; j++) {
+          if (j === n - 1 && i === 0) continue;
+          const a = nodes[tour[i]],
+            b = nodes[tour[i + 1]];
+          const c = nodes[tour[j]],
+            d = nodes[tour[(j + 1) % n]];
+          if (dist(a, c) + dist(b, d) < dist(a, b) + dist(c, d) - 1e-10) {
+            let l = i + 1,
+              r = j;
+            while (l < r) {
+              [tour[l], tour[r]] = [tour[r], tour[l]];
+              l++;
+              r--;
+            }
+            improved = true;
+            redraw({
+              mst,
+              subtours: [{ order: tour, color: "#4488ff" }],
+            });
+            await wait();
+          }
+        }
+      }
+      setStatus(`2-opt pass ${pass}…`, "running");
+    }
+    frozenTour = [...tour];
+    setPhase(2, "done");
+    await sleep(150);
+  } else {
+    setPhase(1, "done");
+    setPhase(2, "done");
+    setStatus("tour loaded from cache — skipping 2-opt", "running");
+    redraw({ mst, subtours: [{ order: tour, color: "#4488ff" }] });
+    await wait(400);
+  }
+
+  // ── Phase 3: Binary search ───────────────────────────────
+  setPhase(3, "active");
+  setStatus("binary search for min makespan X…", "running");
+  redraw({
+    mst,
+    subtours: [{ order: tour, color: "rgba(68,136,255,0.3)" }],
+  });
+  await wait(300);
+
+  const segs = binarySearchSplit(nodes, tour, K);
+  setPhase(3, "done");
+  await sleep(150);
+
+  // ── Phase 4: Greedy assignment (animate) ─────────────────
+  setPhase(4, "active");
+  setStatus("assigning drones greedily…", "running");
+
+  const subtours = [];
+  for (let i = 0; i < segs.length; i++) {
+    const color = RC[i % RC.length];
+    subtours.push({ order: segs[i], color });
+    redraw({ mst, subtours: [...subtours] });
+    await wait();
+  }
+  setPhase(4, "done");
+  await sleep(150);
+
+  // ── Phase 5: uncross ───────────────────────────
+  setPhase(5, "active");
+  setStatus("uncrossing segments…", "running");
+
+  for (let si = 0; si < subtours.length; si++) {
+    const { order, color } = subtours[si];
+    if (order.length < 4) continue;
+    const seg = [...order];
+    // Find and animate each crossing fix
+    let improved2 = true;
+    while (improved2) {
+      improved2 = false;
+      outer: for (let i = 0; i < seg.length - 1; i++) {
+        for (let j = i + 2; j < seg.length; j++) {
+          if (j === seg.length - 1 && i === 0) continue;
+          const jn = (j + 1) % seg.length;
+          const a = nodes[seg[i]],
+            b = nodes[seg[i + 1]];
+          const c = nodes[seg[j]],
+            d = nodes[seg[jn]];
+          if (segmentsIntersect(a, b, c, d)) {
+            // Animate the crossing
+            mctx.save();
+            mctx.beginPath();
+            mctx.moveTo(a.x, a.y);
+            mctx.lineTo(b.x, b.y);
+            mctx.strokeStyle = "#ff4466";
+            mctx.lineWidth = 2.5;
+            mctx.stroke();
+            mctx.beginPath();
+            mctx.moveTo(c.x, c.y);
+            mctx.lineTo(d.x, d.y);
+            mctx.strokeStyle = "#ff4466";
+            mctx.lineWidth = 2.5;
+            mctx.stroke();
+            mctx.restore();
+            await wait();
+
+            // Fix the crossing
+            let l = i + 1,
+              r = j;
+            while (l < r) {
+              [seg[l], seg[r]] = [seg[r], seg[l]];
+              l++;
+              r--;
+            }
+            subtours[si] = { order: [...seg], color };
+            redraw({ mst, subtours: [...subtours] });
+            await wait();
+            improved2 = true;
+            break outer;
+          }
+        }
+      }
+    }
+    subtours[si] = { order: [...seg], color };
+  }
+
+  setPhase(5, "done");
+  finalize(nodes, subtours, mst);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  METHOD B: MST → balanced K-cut → NN → Or-opt
+// ═══════════════════════════════════════════════════════════
+async function solveB() {
+  const nodes = allNodes();
+
+  // ── Phase 0: MST ─────────────────────────────────────────
+  setPhase(0, "active");
+  setStatus("building MST…", "running");
+
+  let mst = frozenMST;
+  if (!mst) {
+    mst = [];
+    const inTree = new Set([0]);
+    redraw({ mst });
+    await wait();
+    while (inTree.size < nodes.length) {
+      let best = null,
+        bd = Infinity;
+      for (const u of inTree)
+        for (let v = 0; v < nodes.length; v++) {
+          if (inTree.has(v)) continue;
+          const d = dist(nodes[u], nodes[v]);
+          if (d < bd) {
+            bd = d;
+            best = { u, v, d };
+          }
+        }
+      mst.push(best);
+      inTree.add(best.v);
+      redraw({ mst, flashEdge: { u: best.u, v: best.v } });
+      await wait();
+    }
+    frozenMST = mst;
+  } else {
+    redraw({ mst });
+    await wait(300);
+    setStatus("MST loaded from cache", "running");
+  }
+  setPhase(0, "done");
+  await sleep(150);
+
+  // ── Phase 1: Balanced K-cut ───────────────────────────────
+  setPhase(1, "active");
+  setStatus("balanced recursive K-cut…", "running");
+  redraw({ mst });
+  await wait(200);
+
+  const cutSet = balancedKCut(nodes, mst, K);
+
+  // Animate showing cut edges
+  const cutIndices = [...cutSet];
+  for (const ci of cutIndices) {
+    const e = mst[ci];
+    mctx.save();
+    mctx.beginPath();
+    mctx.moveTo(nodes[e.u].x, nodes[e.u].y);
+    mctx.lineTo(nodes[e.v].x, nodes[e.v].y);
+    mctx.strokeStyle = "#ff4466";
+    mctx.lineWidth = 3;
+    mctx.stroke();
+    // draw X
+    const mx = (nodes[e.u].x + nodes[e.v].x) / 2,
+      my = (nodes[e.u].y + nodes[e.v].y) / 2;
+    mctx.strokeStyle = "#ff4466";
+    mctx.lineWidth = 2;
+    mctx.beginPath();
+    mctx.moveTo(mx - 5, my - 5);
+    mctx.lineTo(mx + 5, my + 5);
+    mctx.stroke();
+    mctx.beginPath();
+    mctx.moveTo(mx + 5, my - 5);
+    mctx.lineTo(mx - 5, my + 5);
+    mctx.stroke();
+    mctx.restore();
+    await wait();
+  }
+
+  const comps = getComponents(nodes, mst, cutSet);
+  setPhase(1, "done");
+  await sleep(150);
+
+  // ── Phase 2: NN per subtree ───────────────────────────────
+  setPhase(2, "active");
+  setStatus("nearest-neighbor tour per subtree…", "running");
+
+  const subtours = [];
+  for (let ci = 0; ci < comps.length; ci++) {
+    const comp = comps[ci];
+    const color = RC[ci % RC.length];
+    const subset = comp.includes(0) ? comp : [0, ...comp];
+
+    // Animate NN building
+    const deliveries = subset.filter((v) => v !== 0);
+    const unvis = new Set(deliveries);
+    const order = [0];
+    let cur = 0;
+    while (unvis.size) {
+      let nearest = null,
+        nd = Infinity;
+      for (const v of unvis) {
+        const d = dist(nodes[cur], nodes[v]);
+        if (d < nd) {
+          nd = d;
+          nearest = v;
+        }
+      }
+      unvis.delete(nearest);
+      order.push(nearest);
+      cur = nearest;
+      subtours[ci] = { order: [...order], color };
+      redraw({ mst, subtours: [...subtours], cutEdges: cutIndices });
+      await wait();
+    }
+    subtours[ci] = { order: [...order], color };
+  }
+  setPhase(2, "done");
+  await sleep(150);
+
+  // ── Phase 3: Or-opt per subtree ───────────────────────────
+  setPhase(3, "active");
+  setStatus("Or-opt local polish…", "running");
+
+  for (let ci = 0; ci < subtours.length; ci++) {
+    const { order, color } = subtours[ci];
+    if (order.length < 4) continue;
+    const improved = orOpt(nodes, order);
+    if (improved.join() !== order.join()) {
+      subtours[ci] = { order: improved, color };
+      redraw({ mst, subtours: [...subtours], cutEdges: cutIndices });
+      await wait();
+    }
+  }
+
+  setPhase(3, "done");
+  finalize(nodes, subtours, mst, [...cutIndices]);
+}
+
+// ═══════════════════════════════════════════════════════════
+//  FINALIZE
+// ═══════════════════════════════════════════════════════════
+function finalize(nodes, subtours, mst, cutEdges = []) {
+  const dists = subtours.map((s) => tourDist(nodes, s.order));
+  const makespan = Math.max(...dists);
+  const total = dists.reduce((a, b) => a + b, 0);
+
+  document.getElementById("sv-makespan").textContent = Math.round(makespan);
+  document.getElementById("sv-total").textContent = Math.round(total);
+
+  updateDroneList(subtours, nodes);
+  recordPareto(K, makespan);
+
+  redraw({ mst, subtours, cutEdges });
+  setStatus(
+    `done · ${subtours.length} drone${subtours.length !== 1 ? "s" : ""} · makespan ${Math.round(makespan)} · product ${subtours.length * Math.round(makespan)}`,
+    "done",
+  );
 }
