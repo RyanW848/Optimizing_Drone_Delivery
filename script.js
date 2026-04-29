@@ -140,6 +140,7 @@ map.addEventListener("click", (e) => {
   document.getElementById("sv-makespan").textContent = "—";
   document.getElementById("sv-total").textContent = "—";
   document.getElementById("btnRun").disabled = pts.length < 2;
+  clearPareto();
   resetPhases();
   redraw();
 });
@@ -879,7 +880,7 @@ function drawPareto() {
   pctx.fillStyle = "#ffffff";
   pctx.font = "9px JetBrains Mono,monospace";
   for (let k = minK; k <= maxK; k++) {
-    pctx.fillText(`K=${k}`, px(k), pad.t + ih + 16);
+    pctx.fillText(`${k}`, px(k), pad.t + ih + 16);
   }
   // axis labels
   pctx.fillStyle = "#ffffff";
