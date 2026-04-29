@@ -359,25 +359,88 @@ function binarySearchSplit(nodes, tour, K) {
 // UNCROSS (Method A)
 function findCrossings(nodes, seg) {
   const n = seg.length;
-  for (let i = 0; i < n - 1; i++) {
-    for (let j = i + 2; j < n; j++) {
-      const a = nodes[seg[i]],
-        b = nodes[seg[i + 1]];
-      const c = nodes[seg[j]],
-        d = nodes[seg[(j + 1) % n]];
-      if (segmentsIntersect(a, b, c, d)) {
-        let l = i + 1,
-          r = j;
-        while (l < r) {
-          [seg[l], seg[r]] = [seg[r], seg[l]];
-          l++;
-          r--;
+  let improved = true;
+
+  while (improved) {
+    improved = false;
+
+    // Check depot→first edge (seg[0]→seg[1]) against all interior edges
+    if (n > 2) {
+      const depotEdge = [nodes[seg[0]], nodes[seg[1]]];
+      for (let j = 2; j < n - 1; j++) {
+        const interiorEdge = [nodes[seg[j]], nodes[seg[j + 1]]];
+        if (
+          segmentsIntersect(
+            depotEdge[0],
+            depotEdge[1],
+            interiorEdge[0],
+            interiorEdge[1],
+          )
+        ) {
+          let l = 1,
+            r = j;
+          while (l < r) {
+            [seg[l], seg[r]] = [seg[r], seg[l]];
+            l++;
+            r--;
+          }
+          improved = true;
+          break;
+        }
+      }
+    }
+
+    // Check last→depot edge (seg[n-1]→seg[0]) against all interior edges
+    if (!improved && n > 2) {
+      const returnEdge = [nodes[seg[n - 1]], nodes[seg[0]]];
+      for (let i = 1; i < n - 2; i++) {
+        const interiorEdge = [nodes[seg[i]], nodes[seg[i + 1]]];
+        if (
+          segmentsIntersect(
+            returnEdge[0],
+            returnEdge[1],
+            interiorEdge[0],
+            interiorEdge[1],
+          )
+        ) {
+          let l = i + 1,
+            r = n - 1;
+          while (l < r) {
+            [seg[l], seg[r]] = [seg[r], seg[l]];
+            l++;
+            r--;
+          }
+          improved = true;
+          break;
         }
       }
     }
   }
+
   return seg;
 }
+
+// function findCrossings(nodes, seg) {
+//   const n = seg.length;
+//   for (let i = 0; i < n - 1; i++) {
+//     for (let j = i + 2; j < n; j++) {
+//       const a = nodes[seg[i]],
+//         b = nodes[seg[i + 1]];
+//       const c = nodes[seg[j]],
+//         d = nodes[seg[(j + 1) % n]];
+//       if (segmentsIntersect(a, b, c, d)) {
+//         let l = i + 1,
+//           r = j;
+//         while (l < r) {
+//           [seg[l], seg[r]] = [seg[r], seg[l]];
+//           l++;
+//           r--;
+//         }
+//       }
+//     }
+//   }
+//   return seg;
+// }
 
 function segmentsIntersect(a, b, c, d) {
   const ccw = (P, Q, R) =>
