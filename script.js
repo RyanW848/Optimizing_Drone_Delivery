@@ -847,13 +847,13 @@ function drawPareto() {
   // x labels
   pctx.textAlign = "center";
   pctx.fillStyle = "#ffffff";
-  pctx.font = "9px JetBrains Mono,monospace";
+  pctx.font = "11px JetBrains Mono,monospace";
   for (let k = minK; k <= maxK; k++) {
     pctx.fillText(`${k}`, px(k), pad.t + ih + 16);
   }
   // axis labels
   pctx.fillStyle = "#ffffff";
-  pctx.font = "9px JetBrains Mono,monospace";
+  pctx.font = "11px JetBrains Mono,monospace";
   pctx.textAlign = "center";
   pctx.fillText("drones (K)", pad.l + iw / 2, H - 4);
   pctx.save();
@@ -886,15 +886,15 @@ function drawPareto() {
       y = py(p.makespan);
     const color = p.algo === "A" ? "#4488ff" : "#3dff9a";
     pctx.beginPath();
-    pctx.arc(x, y, 6, 0, Math.PI * 2);
+    pctx.arc(x, y, 10, 0, Math.PI * 2);
     pctx.fillStyle = color + "30";
     pctx.fill();
     pctx.beginPath();
-    pctx.arc(x, y, 3.5, 0, Math.PI * 2);
+    pctx.arc(x, y, 6, 0, Math.PI * 2);
     pctx.fillStyle = color;
     pctx.fill();
     pctx.fillStyle = color;
-    pctx.font = "9px JetBrains Mono,monospace";
+    pctx.font = "11px JetBrains Mono,monospace";
     pctx.textAlign = "center";
     pctx.fillText(Math.round(p.makespan), x, y - 12);
   }
