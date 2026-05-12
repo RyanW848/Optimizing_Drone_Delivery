@@ -413,6 +413,13 @@ function findCrossings(nodes, seg) {
 }
 
 function segmentsIntersect(a, b, c, d) {
+  if ((a.x === c.x && a.y === c.y) || 
+      (a.x === d.x && a.y === d.y) || 
+      (b.x === c.x && b.y === c.y) || 
+      (b.x === d.x && b.y === d.y)) {
+    return false;
+  }
+  
   const ccw = (P, Q, R) =>
     (R.y - P.y) * (Q.x - P.x) > (Q.y - P.y) * (R.x - P.x);
   return ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
