@@ -1027,6 +1027,10 @@ async function solveA() {
       await wait();
     }
     tour = [...new Set(walk)];
+
+    const pre2OptDist = tourDist(nodes, tour);
+    document.getElementById("sv-total").textContent = `${Math.round(pre2OptDist)}`;
+    
     setPhase(1, "done");
     await sleep(150);
 
@@ -1067,6 +1071,10 @@ async function solveA() {
       }
       setStatus(`2-opt pass ${pass}…`, "running");
     }
+
+    const post2OptDist = tourDist(nodes, tour);
+    document.getElementById("sv-total").textContent = `${Math.round(post2OptDist)}`;
+
     frozenTour = [...tour];
     setPhase(2, "done");
     await sleep(150);
