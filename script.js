@@ -20,6 +20,16 @@ let frozenTour = null;
 
 let paretoData = [];
 
+// optimal-solver state
+const $ = (id) => document.getElementById(id);
+const OPT_API =
+  new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+let lastHeur = null; // { k, subtours, mst, makespan } from the last heuristic run
+let optByK = {}; // k -> { k, routes:[{order,color}], makespan, bound, proven, ... }
+let optJob = null; // { id, k, tl, stopping } while a Gurobi solve is running
+let viewMode = "overlay"; // heuristic | overlay | optimal
+let serverOnline = false;
+
 const RC = [
   "#4488ff",
   "#3dff9a",
@@ -31,6 +41,19 @@ const RC = [
   "#ffee44",
   "#ff44bb",
   "#88ff44",
+];
+
+const OC = [
+  "#ffd166",
+  "#ef476f",
+  "#06d6a0",
+  "#9b8cff",
+  "#ff9f68",
+  "#4cc9f0",
+  "#f72585",
+  "#b5e48c",
+  "#fee440",
+  "#c8b6ff",
 ];
 
 // Phase definitions per algo
@@ -54,7 +77,8 @@ function resizeMap() {
   const r = wrap.getBoundingClientRect();
   map.width = r.width;
   map.height = r.height;
-  redraw();
+  if (lastHeur && !animating) renderFinal();
+  else redraw();
 }
 function resizePareto() {
   const pw = document.querySelector(".pareto-wrap");
@@ -73,18 +97,6 @@ setTimeout(() => {
   resizePareto();
   buildPhaseUI();
 }, 60);
-
-// ALGO SWITCH
-function switchAlgo(a) {
-  algo = a;
-  document.getElementById("btnA").classList.toggle("active", a === "A");
-  document.getElementById("btnB").classList.toggle("active", a === "B");
-  document.getElementById("algolabel").textContent =
-    a === "A"
-      ? "Method A · MST + DFS + 2-opt → binary split + uncross"
-      : "Method B · MST → balanced K-cut → NN + Or-opt";
-  buildPhaseUI();
-}
 
 // PHASES UI
 function buildPhaseUI() {
@@ -140,6 +152,7 @@ map.addEventListener("click", (e) => {
   document.getElementById("sv-makespan").textContent = "—";
   document.getElementById("sv-total").textContent = "—";
   document.getElementById("btnRun").disabled = pts.length < 2;
+  lastHeur = null;
   clearPareto();
   resetPhases();
   redraw();
@@ -151,6 +164,7 @@ function onK(v) {
   document.getElementById("sv-k").textContent = K;
   document.getElementById("ksub").textContent =
     K === 1 ? "1 drone" : `${K} drones`;
+  updateOptUI();
 }
 function updateKMax() {
   const sl = document.getElementById("kslider");
@@ -169,6 +183,9 @@ function clearAll() {
   pts = [];
   frozenMST = null;
   frozenTour = null;
+  lastHeur = null;
+  optByK = {};
+  drawPareto();
   K = 1;
   document.getElementById("kslider").value = 1;
   onK(1);
@@ -185,7 +202,10 @@ function clearAll() {
 }
 function clearPareto() {
   paretoData = [];
+  optByK = {};
   drawPareto();
+  updateOptUI();
+  if (lastHeur && !animating) renderFinal();
   document.getElementById("statusbar").textContent =
     "run solver at different K values to build frontier";
 }
@@ -413,13 +433,15 @@ function findCrossings(nodes, seg) {
 }
 
 function segmentsIntersect(a, b, c, d) {
-  if ((a.x === c.x && a.y === c.y) || 
-      (a.x === d.x && a.y === d.y) || 
-      (b.x === c.x && b.y === c.y) || 
-      (b.x === d.x && b.y === d.y)) {
+  if (
+    (a.x === c.x && a.y === c.y) ||
+    (a.x === d.x && a.y === d.y) ||
+    (b.x === c.x && b.y === c.y) ||
+    (b.x === d.x && b.y === d.y)
+  ) {
     return false;
   }
-  
+
   const ccw = (P, Q, R) =>
     (R.y - P.y) * (Q.x - P.x) > (Q.y - P.y) * (R.x - P.x);
   return ccw(a, c, d) !== ccw(b, c, d) && ccw(a, b, c) !== ccw(a, b, d);
@@ -624,6 +646,8 @@ function redraw(state = {}) {
     cutEdges = [], // edge indices that are cut
     flashEdge = null, // {u,v} to flash bright
     highlightNodes = [], // node indices to highlight
+    optRoutes = [], // [{order,color}] optimal routes, drawn dashed on top
+    subAlpha = 0.9, // opacity of the heuristic routes
   } = state;
 
   const nodes = allNodes();
@@ -679,7 +703,16 @@ function redraw(state = {}) {
     if (order.length < 2) continue;
     const full = [...order, order[0]];
     for (let i = 0; i < full.length - 1; i++) {
-      drawArrow(nodes[full[i]], nodes[full[i + 1]], color, 2, 0.9);
+      drawArrow(nodes[full[i]], nodes[full[i + 1]], color, 2, subAlpha);
+    }
+  }
+
+  // Optimal routes (Gurobi): bold + dashed so they read as a different layer
+  for (const { order, color } of optRoutes) {
+    if (order.length < 2) continue;
+    const full = [...order, order[0]];
+    for (let i = 0; i < full.length - 1; i++) {
+      drawArrow(nodes[full[i]], nodes[full[i + 1]], color, 3, 1, [8, 5]);
     }
   }
 
@@ -698,7 +731,7 @@ function redraw(state = {}) {
 
   // Delivery points
   const ownedBy = new Array(nodes.length).fill(null);
-  for (const { order, color } of subtours)
+  for (const { order, color } of optRoutes.length ? optRoutes : subtours)
     for (const v of order) ownedBy[v] = color;
 
   for (let i = 1; i < nodes.length; i++) {
@@ -723,7 +756,7 @@ function drawLine(a, b, color, width, dash = []) {
   mctx.restore();
 }
 
-function drawArrow(a, b, color, width, alpha = 1) {
+function drawArrow(a, b, color, width, alpha = 1, dash = []) {
   mctx.save();
   mctx.globalAlpha = alpha;
   const dx = b.x - a.x,
@@ -740,8 +773,9 @@ function drawArrow(a, b, color, width, alpha = 1) {
   mctx.lineTo(b.x - ux * 9, b.y - uy * 9);
   mctx.strokeStyle = color;
   mctx.lineWidth = width;
-  mctx.setLineDash([]);
+  mctx.setLineDash(dash);
   mctx.stroke();
+  mctx.setLineDash([]);
   mctx.beginPath();
   mctx.moveTo(b.x - ux * 9, b.y - uy * 9);
   mctx.lineTo(b.x - ux * 16 + uy * 5, b.y - uy * 16 - ux * 5);
@@ -811,7 +845,8 @@ function drawPareto() {
   pctx.roundRect(0, 0, W, H, 6);
   pctx.fill();
 
-  if (!paretoData.length) {
+  const optList = Object.values(optByK).sort((a, b) => a.k - b.k);
+  if (!paretoData.length && !optList.length) {
     pctx.fillStyle = "#5a5a72";
     pctx.font = "11px JetBrains Mono,monospace";
     pctx.textAlign = "center";
@@ -824,8 +859,11 @@ function drawPareto() {
   const iw = W - pad.l - pad.r,
     ih = H - pad.t - pad.b;
 
-  const kVals = paretoData.map((p) => p.k);
-  const msVals = paretoData.map((p) => p.makespan);
+  const kVals = [...paretoData.map((p) => p.k), ...optList.map((p) => p.k)];
+  const msVals = [
+    ...paretoData.map((p) => p.makespan),
+    ...optList.map((p) => p.makespan),
+  ];
   const minK = 1,
     maxK = Math.max(...kVals, 2);
   const minMs = 0,
@@ -905,6 +943,8 @@ function drawPareto() {
     pctx.textAlign = "center";
     pctx.fillText(Math.round(p.makespan), x, y - 12);
   }
+
+  drawOptSeries(px, py, optList);
 }
 
 function updateDroneList(subtours, nodes) {
@@ -929,16 +969,17 @@ async function runSolve() {
   animating = true;
   paused = false;
   document.getElementById("btnRun").disabled = true;
+  updateOptUI();
   resetPhases();
   document.getElementById("dronelist").innerHTML = "";
   document.getElementById("sv-makespan").textContent = "—";
   document.getElementById("sv-total").textContent = "—";
 
-  if (algo === "A") await solveA();
-  else await solveB();
+  await solveA();
 
   animating = false;
   document.getElementById("btnRun").disabled = false;
+  updateOptUI();
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -1154,144 +1195,6 @@ async function solveA() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  METHOD B: MST → balanced K-cut → NN → Or-opt
-// ═══════════════════════════════════════════════════════════
-async function solveB() {
-  const nodes = allNodes();
-
-  // ── Phase 0: MST ─────────────────────────────────────────
-  setPhase(0, "active");
-  setStatus("building MST…", "running");
-
-  let mst = frozenMST;
-  if (!mst) {
-    mst = [];
-    const inTree = new Set([0]);
-    redraw({ mst });
-    await wait();
-    while (inTree.size < nodes.length) {
-      let best = null,
-        bd = Infinity;
-      for (const u of inTree)
-        for (let v = 0; v < nodes.length; v++) {
-          if (inTree.has(v)) continue;
-          const d = dist(nodes[u], nodes[v]);
-          if (d < bd) {
-            bd = d;
-            best = { u, v, d };
-          }
-        }
-      mst.push(best);
-      inTree.add(best.v);
-      redraw({ mst, flashEdge: { u: best.u, v: best.v } });
-      await wait();
-    }
-    frozenMST = mst;
-  } else {
-    redraw({ mst });
-    await wait(300);
-    setStatus("MST loaded from cache", "running");
-  }
-  setPhase(0, "done");
-  await sleep(150);
-
-  // ── Phase 1: Balanced K-cut ───────────────────────────────
-  setPhase(1, "active");
-  setStatus("balanced recursive K-cut…", "running");
-  redraw({ mst });
-  await wait(200);
-
-  const cutSet = balancedKCut(nodes, mst, K);
-
-  // Animate showing cut edges
-  const cutIndices = [...cutSet];
-  for (const ci of cutIndices) {
-    const e = mst[ci];
-    mctx.save();
-    mctx.beginPath();
-    mctx.moveTo(nodes[e.u].x, nodes[e.u].y);
-    mctx.lineTo(nodes[e.v].x, nodes[e.v].y);
-    mctx.strokeStyle = "#ff4466";
-    mctx.lineWidth = 3;
-    mctx.stroke();
-    // draw X
-    const mx = (nodes[e.u].x + nodes[e.v].x) / 2,
-      my = (nodes[e.u].y + nodes[e.v].y) / 2;
-    mctx.strokeStyle = "#ff4466";
-    mctx.lineWidth = 2;
-    mctx.beginPath();
-    mctx.moveTo(mx - 5, my - 5);
-    mctx.lineTo(mx + 5, my + 5);
-    mctx.stroke();
-    mctx.beginPath();
-    mctx.moveTo(mx + 5, my - 5);
-    mctx.lineTo(mx - 5, my + 5);
-    mctx.stroke();
-    mctx.restore();
-    await wait();
-  }
-
-  const comps = getComponents(nodes, mst, cutSet);
-  setPhase(1, "done");
-  await sleep(150);
-
-  // ── Phase 2: NN per subtree ───────────────────────────────
-  setPhase(2, "active");
-  setStatus("nearest-neighbor tour per subtree…", "running");
-
-  const subtours = [];
-  for (let ci = 0; ci < comps.length; ci++) {
-    const comp = comps[ci];
-    const color = RC[ci % RC.length];
-    const subset = comp.includes(0) ? comp : [0, ...comp];
-
-    // Animate NN building
-    const deliveries = subset.filter((v) => v !== 0);
-    const unvis = new Set(deliveries);
-    const order = [0];
-    let cur = 0;
-    while (unvis.size) {
-      let nearest = null,
-        nd = Infinity;
-      for (const v of unvis) {
-        const d = dist(nodes[cur], nodes[v]);
-        if (d < nd) {
-          nd = d;
-          nearest = v;
-        }
-      }
-      unvis.delete(nearest);
-      order.push(nearest);
-      cur = nearest;
-      subtours[ci] = { order: [...order], color };
-      redraw({ mst, subtours: [...subtours], cutEdges: cutIndices });
-      await wait();
-    }
-    subtours[ci] = { order: [...order], color };
-  }
-  setPhase(2, "done");
-  await sleep(150);
-
-  // ── Phase 3: Or-opt per subtree ───────────────────────────
-  setPhase(3, "active");
-  setStatus("Or-opt local polish…", "running");
-
-  for (let ci = 0; ci < subtours.length; ci++) {
-    const { order, color } = subtours[ci];
-    if (order.length < 4) continue;
-    const improved = orOpt(nodes, order);
-    if (improved.join() !== order.join()) {
-      subtours[ci] = { order: improved, color };
-      redraw({ mst, subtours: [...subtours], cutEdges: cutIndices });
-      await wait();
-    }
-  }
-
-  setPhase(3, "done");
-  finalize(nodes, subtours, mst, [...cutIndices]);
-}
-
-// ═══════════════════════════════════════════════════════════
 //  FINALIZE
 // ═══════════════════════════════════════════════════════════
 function finalize(nodes, subtours, mst, cutEdges = []) {
@@ -1305,9 +1208,319 @@ function finalize(nodes, subtours, mst, cutEdges = []) {
   updateDroneList(subtours, nodes);
   recordPareto(K, makespan);
 
-  redraw({ mst, subtours, cutEdges });
+  lastHeur = { k: K, subtours, mst, makespan };
+  renderFinal();
   setStatus(
     `done · ${subtours.length} drone${subtours.length !== 1 ? "s" : ""} · makespan ${Math.round(makespan)} · product ${subtours.length * Math.round(makespan)}`,
     "done",
   );
 }
+
+// ═══════════════════════════════════════════════════════════
+//  OPTIMAL SOLVER — Gurobi via the Python server in /server
+// ═══════════════════════════════════════════════════════════
+const fmt1 = (v) => v.toFixed(1);
+
+// Draws whatever the current view mode asks for, from cached results.
+function renderFinal() {
+  if (!lastHeur) {
+    redraw();
+    return;
+  }
+  const opt = optByK[lastHeur.k];
+  const v = opt ? viewMode : "heuristic";
+  redraw({
+    mst: v === "optimal" ? [] : lastHeur.mst,
+    subtours: v === "optimal" ? [] : lastHeur.subtours,
+    optRoutes: v === "heuristic" ? [] : opt.routes,
+    subAlpha: v === "overlay" ? 0.3 : 0.9,
+  });
+}
+
+function setView(v) {
+  viewMode = v;
+  renderFinal();
+  updateOptUI();
+}
+
+async function checkServer() {
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort(), 2500);
+  let info = null;
+  try {
+    const r = await fetch(`${OPT_API}/health`, { signal: ctl.signal });
+    info = await r.json();
+  } catch (_) {
+    info = null;
+  }
+  clearTimeout(timer);
+  serverOnline = !!(info && info.ok);
+  $("srvDot").className = "srv-dot " + (serverOnline ? "on" : "off");
+  $("srvText").textContent = serverOnline
+    ? `solver online · Gurobi ${info.gurobi}`
+    : "solver offline";
+  $("srvText").title = OPT_API;
+  return serverOnline;
+}
+
+function setOptMsg(text) {
+  const el = $("optMsg");
+  el.textContent = text || "";
+  el.hidden = !text;
+}
+
+function updateOptUI() {
+  const solving = !!optJob;
+  const ready = !!lastHeur && lastHeur.k === K && !animating && !solving;
+  $("btnOpt").disabled = !ready;
+  $("btnOpt").hidden = solving;
+  $("btnStop").hidden = !solving;
+  $("btnStop").disabled = solving && optJob.stopping;
+  $("btnStop").textContent =
+    solving && optJob.stopping ? "stopping…" : "Stop and keep best";
+  $("optLive").hidden = !solving;
+  $("optTL").disabled = solving;
+  $("kslider").disabled = solving;
+
+  const res = optByK[K];
+  const hint = $("optHint");
+  if (solving) hint.textContent = "";
+  else if (!lastHeur)
+    hint.textContent = "Run the heuristic first, then compare it to the true optimum.";
+  else if (lastHeur.k !== K)
+    hint.textContent = `The heuristic last ran with K=${lastHeur.k}. Run it with K=${K} to compare.`;
+  else if (animating) hint.textContent = "Waiting for the heuristic to finish.";
+  else if (res && !res.proven)
+    hint.textContent = "Not proven optimal yet. Raise the time limit and solve again.";
+  else hint.textContent = "";
+  hint.hidden = !hint.textContent;
+
+  // result card + view switch: only when it describes what's on the map
+  const show = !solving && !!res && !!lastHeur && lastHeur.k === K;
+  $("optResult").hidden = !show;
+  $("viewSeg").hidden = !show;
+  if (!show) return;
+
+  const nodes = allNodes();
+  const heur = lastHeur.makespan;
+  const aboveBest = Math.max(0, ((heur - res.makespan) / res.makespan) * 100);
+  let verdict;
+  if (res.proven)
+    verdict =
+      aboveBest < 0.05
+        ? "The heuristic found the optimum."
+        : `The heuristic is <b>+${aboveBest.toFixed(1)}%</b> above optimal.`;
+  else {
+    const worst = Math.max(0, ((heur - res.bound) / res.bound) * 100);
+    verdict = `The heuristic is <b>+${aboveBest.toFixed(1)}%</b> above the best solution found, and at most <b>+${worst.toFixed(1)}%</b> above optimal.`;
+  }
+  const badge = res.proven
+    ? `<span class="badge ok">proven optimal</span>`
+    : `<span class="badge warn">best found · lower bound ${fmt1(res.bound)} · gap ${(res.gap * 100).toFixed(1)}%</span>`;
+  const list = res.routes
+    .map((r, i) => {
+      const stops = r.order.filter((v) => v !== 0).length;
+      return `<div class="ritem"><span class="rswatch dashed" style="background:${r.color}"></span>
+        <span class="rname">R${i + 1}</span><span class="rstops">${stops} stops</span>
+        <span class="rdist">${Math.round(tourDist(nodes, r.order))}u</span></div>`;
+    })
+    .join("");
+  $("optResult").innerHTML = `
+    <div class="sgrid">
+      <div class="sbox"><div class="sv" style="color:var(--amber)">${fmt1(res.makespan)}</div><div class="sk">${res.proven ? "optimal" : "best found"}</div></div>
+      <div class="sbox"><div class="sv">${fmt1(heur)}</div><div class="sk">heuristic</div></div>
+    </div>
+    <div class="opt-verdict">${verdict}</div>
+    <div class="opt-meta">${badge}<span>${res.runtime.toFixed(1)}s</span></div>
+    <div class="drone-list">${list}</div>`;
+  document
+    .querySelectorAll(".segbtn")
+    .forEach((b) => b.classList.toggle("active", b.dataset.v === viewMode));
+}
+
+function renderLive(j) {
+  const best = j.best, bound = j.bound;
+  $("optBest").textContent = best != null ? fmt1(best) : "—";
+  $("optBound").textContent = bound != null ? fmt1(bound) : "—";
+  $("optGap").textContent =
+    best != null && bound != null && best > 0
+      ? `${(Math.max(0, best - bound) / best * 100).toFixed(1)}%`
+      : "—";
+  const t = optJob ? optJob.tl : 60;
+  $("optBar").style.width = `${Math.min(100, ((j.elapsed || 0) / t) * 100)}%`;
+  $("optElapsed").textContent = `${Math.round(j.elapsed || 0)}s of ${t}s`;
+}
+
+async function runOptimal() {
+  if (!lastHeur || lastHeur.k !== K || animating || optJob) return;
+  const k = lastHeur.k;
+  const tl = Math.min(600, Math.max(5, +$("optTL").value || 60));
+  $("optTL").value = tl;
+  setOptMsg("");
+
+  if (!(await checkServer())) {
+    setOptMsg(
+      `Can't reach the solver at ${OPT_API}. Start it with "uvicorn server:app --port 8000" in the server folder, then try again.`,
+    );
+    return;
+  }
+
+  const body = {
+    nodes: allNodes().map((p) => [p.x, p.y]),
+    k,
+    time_limit: tl,
+    warm_start: lastHeur.subtours.map((s) => s.order),
+  };
+  animating = true; // locks map editing / Run / Clear while the solve runs
+  $("btnRun").disabled = true;
+  optJob = { id: null, k, tl, stopping: false };
+  updateOptUI();
+  renderLive({ best: lastHeur.makespan, bound: null, elapsed: 0 });
+  setStatus("solving to optimality…", "running");
+
+  try {
+    const res = await fetch(`${OPT_API}/solve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      const e = await res.json().catch(() => ({}));
+      throw new Error(
+        typeof e.detail === "string" ? e.detail : `server rejected the request (${res.status})`,
+      );
+    }
+    optJob.id = (await res.json()).job_id;
+
+    let fails = 0, job;
+    for (;;) {
+      await sleep(400);
+      try {
+        const r = await fetch(`${OPT_API}/jobs/${optJob.id}`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        job = await r.json();
+        fails = 0;
+      } catch (_) {
+        if (++fails >= 4) throw new Error("lost the connection to the solver");
+        continue;
+      }
+      renderLive(job);
+      if (job.status !== "running") break;
+    }
+    if (job.status === "error") throw new Error(job.error || "solver error");
+
+    const r = job.result;
+    optByK[k] = {
+      k,
+      makespan: r.makespan,
+      bound: r.bound,
+      gap: r.gap,
+      proven: r.proven,
+      status: r.status,
+      runtime: r.runtime,
+      routes: r.routes.map((order, i) => ({ order, color: OC[i % OC.length] })),
+    };
+    viewMode = "overlay";
+    const pct = ((lastHeur.makespan - r.makespan) / r.makespan) * 100;
+    setStatus(
+      `${r.proven ? "optimal" : "best found"} · makespan ${fmt1(r.makespan)} · heuristic +${Math.max(0, pct).toFixed(1)}%`,
+      "done",
+    );
+  } catch (e) {
+    if (optJob && optJob.id)
+      fetch(`${OPT_API}/jobs/${optJob.id}/cancel`, { method: "POST" }).catch(() => {});
+    setOptMsg(e.message);
+    setStatus("optimal solve failed", "");
+  } finally {
+    animating = false;
+    optJob = null;
+    $("btnRun").disabled = pts.length < 2;
+    updateOptUI();
+    renderFinal();
+    drawPareto();
+  }
+}
+
+async function stopOptimal() {
+  if (!optJob || !optJob.id || optJob.stopping) return;
+  optJob.stopping = true;
+  updateOptUI();
+  try {
+    await fetch(`${OPT_API}/jobs/${optJob.id}/cancel`, { method: "POST" });
+  } catch (_) {}
+}
+
+// Pareto: optimal makespan per K (diamond), with a bar down to the proven
+// lower bound whenever the solve hit the time limit before closing the gap.
+function drawOptSeries(px, py, optList) {
+  if (!optList.length) return;
+  const col = "#f5a623";
+  pctx.save();
+  if (optList.length > 1) {
+    pctx.beginPath();
+    optList.forEach((o, i) =>
+      i
+        ? pctx.lineTo(px(o.k), py(o.makespan))
+        : pctx.moveTo(px(o.k), py(o.makespan)),
+    );
+    pctx.strokeStyle = "rgba(245,166,35,0.45)";
+    pctx.lineWidth = 1.5;
+    pctx.setLineDash([]);
+    pctx.stroke();
+  }
+  const diamond = (x, y, r) => {
+    pctx.beginPath();
+    pctx.moveTo(x, y - r);
+    pctx.lineTo(x + r, y);
+    pctx.lineTo(x, y + r);
+    pctx.lineTo(x - r, y);
+    pctx.closePath();
+  };
+  pctx.font = "11px JetBrains Mono,monospace";
+  pctx.textBaseline = "middle";
+  for (const o of optList) {
+    const x = px(o.k), y = py(o.makespan);
+    if (!o.proven) {
+      const yb = py(o.bound);
+      pctx.strokeStyle = col;
+      pctx.lineWidth = 1.5;
+      pctx.beginPath();
+      pctx.moveTo(x, y);
+      pctx.lineTo(x, yb);
+      pctx.moveTo(x - 5, yb);
+      pctx.lineTo(x + 5, yb);
+      pctx.stroke();
+    }
+    diamond(x, y, 8);
+    pctx.fillStyle = o.proven ? col : "#0f0f18";
+    pctx.fill();
+    pctx.strokeStyle = col;
+    pctx.lineWidth = 2;
+    pctx.stroke();
+    pctx.fillStyle = col;
+    pctx.textAlign = "left";
+    pctx.fillText(Math.round(o.makespan) + (o.proven ? "" : "*"), x + 13, y);
+  }
+
+  // legend
+  const W = pcan.width;
+  const rows = [
+    ["#4488ff", "●", "heuristic"],
+    [col, "◆", "optimal (Gurobi)"],
+  ];
+  if (optList.some((o) => !o.proven))
+    rows.push([col, "◇", "* best found; bar reaches the lower bound"]);
+  pctx.font = "10px JetBrains Mono,monospace";
+  pctx.textAlign = "right";
+  rows.forEach(([c, sym, label], i) => {
+    const y = 14 + i * 14;
+    pctx.fillStyle = "#8888a8";
+    pctx.fillText(label, W - 24, y);
+    pctx.fillStyle = c;
+    pctx.fillText(sym, W - 10, y);
+  });
+  pctx.restore();
+}
+
+checkServer();
+updateOptUI();
