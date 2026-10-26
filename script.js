@@ -1367,7 +1367,7 @@ async function runOptimal() {
 
   if (!(await checkServer())) {
     setOptMsg(
-      `Can't reach the solver at ${OPT_API}. Start it with "uvicorn server:app --port 8000" in the server folder, then try again.`,
+      `Can't reach the solver at ${OPT_API}.`,
     );
     return;
   }
