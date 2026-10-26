@@ -27,7 +27,7 @@ const OPT_API =
   (location.protocol === "file:" ||
   ["localhost", "127.0.0.1"].includes(location.hostname)
     ? "http://localhost:8000"
-    : "https://drone-delivery-solver.onrender.com/");
+    : "https://drone-delivery-solver.onrender.com");
 let lastHeur = null; // { k, subtours, mst, makespan } from the last heuristic run
 let optByK = {}; // k -> { k, routes:[{order,color}], makespan, bound, proven, ... }
 let optJob = null; // { id, k, tl, stopping } while a Gurobi solve is running
