@@ -23,7 +23,11 @@ let paretoData = [];
 // optimal-solver state
 const $ = (id) => document.getElementById(id);
 const OPT_API =
-  new URLSearchParams(location.search).get("api") || "http://localhost:8000";
+  new URLSearchParams(location.search).get("api") ||
+  (location.protocol === "file:" ||
+  ["localhost", "127.0.0.1"].includes(location.hostname)
+    ? "http://localhost:8000"
+    : "https://drone-delivery-solver.onrender.com/");
 let lastHeur = null; // { k, subtours, mst, makespan } from the last heuristic run
 let optByK = {}; // k -> { k, routes:[{order,color}], makespan, bound, proven, ... }
 let optJob = null; // { id, k, tl, stopping } while a Gurobi solve is running
@@ -1244,8 +1248,11 @@ function setView(v) {
 }
 
 async function checkServer() {
+  $("srvDot").className = "srv-dot";
+  $("srvText").textContent = "waking up solver…";
+  $("srvText").title = OPT_API;
   const ctl = new AbortController();
-  const timer = setTimeout(() => ctl.abort(), 2500);
+  const timer = setTimeout(() => ctl.abort(), 70000);
   let info = null;
   try {
     const r = await fetch(`${OPT_API}/health`, { signal: ctl.signal });
